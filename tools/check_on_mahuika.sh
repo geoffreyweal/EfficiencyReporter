@@ -52,6 +52,7 @@ indent() {
 }
 
 echo "== Efficiency Reporter check: $(hostname -s) $(date '+%F %T') as $(id -un), shell $SHELL"
+echo "    SLURM_TIME_FORMAT in your shell: ${SLURM_TIME_FORMAT:-<not set>} (the app's scripts use \"standard\")"
 echo "== Where the commands are (PATH plus /opt/nesi/bin)"
 for tool in sacct seff profile_plot base64 mktemp cksum; do
   printf '    %-13s %s\n' "$tool" "$(PATH="$PATH:/opt/nesi/bin" command -v "$tool" || echo 'NOT FOUND')"

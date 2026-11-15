@@ -498,6 +498,19 @@ module EfficiencyReporter
       refute(jobs.any? { |j| j.key?("seff") })
     end
 
+    # Some sites set SLURM_TIME_FORMAT for everyone (for squeue). The app's
+    # sacct calls must still give times it can read, or finished jobs drop
+    # out of the 7 and 30-day views, and nothing is saved.
+    def test_a_site_time_format
+      old = ENV["SLURM_TIME_FORMAT"]
+      ENV["SLURM_TIME_FORMAT"] = "%b %d %H:%M"
+      finished = jobs.reject { |j| Sacct::ACTIVE_STATES.include?(j["state"]) }
+      assert_operator finished.length, :>, 150
+      assert(finished.all? { |j| j["end"].to_s.match?(/\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\z/) })
+    ensure
+      ENV["SLURM_TIME_FORMAT"] = old
+    end
+
     def test_recent_jobs_only
       status, week = get_json("/api/jobs?days=7")
       assert_equal 200, status, week.inspect

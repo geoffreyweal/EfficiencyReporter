@@ -46,9 +46,15 @@
     SUSPENDED: ['Suspended', 'pending', 'active']
   };
 
+  // The State filter. "finished" is every job that has ended, however it
+  // ended; the choices under it pick one kind of ending.
   const STATE_FILTERS = [
-    ['all', 'All states'], ['completed', 'Completed'], ['failed', 'Failed'], ['oom', 'Out of memory'],
-    ['timeout', 'Timed out'], ['cancelled', 'Cancelled'], ['active', 'Running or waiting'], ['other', 'Other']
+    ['all', 'All states'],
+    ['Finished', [
+      ['finished', 'All finished jobs'], ['completed', 'Completed'], ['failed', 'Failed'], ['oom', 'Out of memory'],
+      ['timeout', 'Timed out'], ['cancelled', 'Cancelled'], ['other', 'Other endings']
+    ]],
+    ['active', 'Running or waiting']
   ];
 
   // The kinds of measurement seff reports. "judged" ones are coloured by how
@@ -482,7 +488,11 @@
     const text = f.text.trim().toLowerCase();
     return S.jobs.filter((job) => {
       if (since && job.lastMs < since) return false;
-      if (f.state !== 'all' && stateInfo(job.state).group !== f.state) return false;
+      if (f.state === 'finished') {
+        if (ACTIVE.has(job.state)) return false;
+      } else if (f.state !== 'all' && stateInfo(job.state).group !== f.state) {
+        return false;
+      }
       if (f.profiled && !isProfiled(job)) return false;
       if (f.attention && !needsAttention(job)) return false;
       if (text) {
@@ -573,6 +583,7 @@
       tr.replaceWith(fresh);
       if (hadFocus) fresh.querySelector('.expander button').focus({ preventScroll: true });
     }
+    fitTable();
   }
 
   // Changes whenever anything a job's row shows changes.
@@ -668,7 +679,9 @@
     }
 
     const stateSelect = el('select', { 'aria-label': 'State' },
-      STATE_FILTERS.map(([value, label]) => el('option', { value }, label)));
+      STATE_FILTERS.map(([value, label]) => (Array.isArray(label)
+        ? el('optgroup', { label: value }, label.map(([v, l]) => el('option', { value: v }, l)))
+        : el('option', { value }, label))));
     stateSelect.value = S.filters.state;
     stateSelect.addEventListener('change', () => {
       S.filters.state = stateSelect.value;
@@ -899,13 +912,34 @@
     }
 
     const table = el('table', { class: S.hasGpu ? 'jobs has-gpu' : 'jobs' }, el('thead', null, headRow), body);
-    shell.table.replaceChildren(el('div', { class: 'table-scroll' }, table), pager(sorted.length, pages, first, shown.length));
+    shell.table.replaceChildren(el('div', { class: 'jobs-scroll' }, table), pager(sorted.length, pages, first, shown.length));
+    fitTable();
 
     if (focusedId) {
       const button = shell.table.querySelector(`tr.job[data-id="${CSS.escape(focusedId)}"] .expander button`);
       if (button) button.focus({ preventScroll: true });
     }
   }
+
+  // The header stays in view as the page scrolls (see .jobs-scroll in
+  // app.css); a table too wide to fit scrolls in a box of its own instead.
+  function fitTable() {
+    const box = shell && shell.table.querySelector('.jobs-scroll');
+    const table = box && box.querySelector('table.jobs');
+    if (!table) return;
+    box.classList.remove('is-wide');
+    box.classList.toggle('is-wide', table.offsetWidth > box.clientWidth + 1);
+  }
+
+  let fitQueued = false;
+  window.addEventListener('resize', () => {
+    if (fitQueued) return;
+    fitQueued = true;
+    requestAnimationFrame(() => {
+      fitQueued = false;
+      fitTable();
+    });
+  });
 
   function headerCell(col) {
     if (!col.key) return el('th', { class: col.cls, scope: 'col' }, el('span', { class: 'visually-hidden' }, col.label));

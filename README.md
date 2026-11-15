@@ -18,8 +18,10 @@ stand-in. On Mahuika it is the chart `profile_plot` makes.)*
 - **A short report for every job**: state, when it finished, how long it ran,
   what it asked for, and `seff`'s figures for time limit used, CPU, memory, GPU
   and GPU memory use, each as a number with a small meter (green, amber, orange
-  or red for CPU, memory, GPU and GPU memory). Sort by any column; filter by date range, state, name or
-  ID, profiled jobs only, or jobs that need attention.
+  or red for CPU, memory, GPU and GPU memory). Sort by any column; filter by
+  date range, state (all finished jobs at once, or one kind of ending), name
+  or ID, profiled jobs only, or jobs that need attention. The table's header
+  stays in view as you scroll down.
 - **A summary** of the jobs shown: the median of each figure, and the share of
   all reserved core time the jobs used.
 - **The full report for any job**, when you select it:

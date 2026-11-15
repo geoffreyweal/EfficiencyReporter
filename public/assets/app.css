@@ -304,18 +304,33 @@ input[type="search"] { width: 240px; max-width: 100%; }
 
 /* ---- Job table ---------------------------------------------------------- */
 
+/* overflow: clip (unlike hidden) does not make the card a scrolling box, so
+   the table's header can stick to the top of the window (see .jobs-scroll). */
 .table-card {
   position: relative;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: var(--shadow);
-  overflow: hidden;
+  overflow: clip;
 }
-/* position: relative keeps the screen-reader-only labels in the table (which
-   are absolutely positioned) inside the scrolling box, so a wide table never
-   widens the page. */
+/* A table inside an opened job (its steps) scrolls sideways when too wide.
+   position: relative keeps screen-reader-only labels inside the box, so a
+   wide table never widens the page. */
 .table-scroll { position: relative; overflow-x: auto; }
+
+/* The job table's header stays in view when the page is scrolled down:
+   position: sticky holds it at the top of the window, which only works when
+   nothing between the table and the page scrolls. So the job table has no
+   scrolling box of its own while it fits; when it is too wide to fit
+   (is-wide, set by app.js), it scrolls both ways in a box no taller than the
+   window, with the header held at the top of that box. */
+.jobs-scroll { position: relative; }
+.jobs-scroll.is-wide {
+  overflow: auto;
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
+}
 
 table.jobs {
   width: 100%;
@@ -332,12 +347,15 @@ table.jobs th, table.jobs td {
 table.jobs thead th {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 3;
   background: var(--surface);
   color: var(--ink-2);
   font-weight: 600;
   font-size: 12px;
-  border-bottom: 1px solid var(--axis);
+  /* A shadow rather than a border, so the rule under the header stays with
+     it while it is stuck (a collapsed table's borders do not move). */
+  border-bottom: 0;
+  box-shadow: inset 0 -1px 0 var(--axis);
 }
 table.jobs th.num, table.jobs td.num { text-align: right; }
 table.jobs td { font-variant-numeric: tabular-nums; }

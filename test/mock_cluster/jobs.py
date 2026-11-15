@@ -30,9 +30,17 @@ def _anchor():
 
 
 def _fmt(epoch):
+    """A time as sacct prints it: as SLURM_TIME_FORMAT says, if it is set to
+    anything but "standard" (some sites set it for everyone), and otherwise
+    as year-month-dateThour:minute:second."""
     if epoch is None:
         return "Unknown"
-    return _dt.datetime.fromtimestamp(epoch).strftime("%Y-%m-%dT%H:%M:%S")
+    fmt = os.environ.get("SLURM_TIME_FORMAT", "") or "standard"
+    if fmt == "standard":
+        fmt = "%Y-%m-%dT%H:%M:%S"
+    elif fmt == "relative":
+        fmt = "%d %b %H:%M"
+    return _dt.datetime.fromtimestamp(epoch).strftime(fmt)
 
 
 def _dur(seconds):

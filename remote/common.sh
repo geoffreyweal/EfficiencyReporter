@@ -27,6 +27,12 @@ if [ -n "${ER_PATH_EXTRA:-}" ]; then
   export PATH
 fi
 
+# sacct prints times as SLURM_TIME_FORMAT says, which a site or a user's
+# shell start-up files may set (e.g. to "%b %d %H:%M" for squeue). The app
+# reads times as year-month-dateThour:minute:second, Slurm's "standard"
+# format, so ask for that. This only affects the commands the app runs.
+export SLURM_TIME_FORMAT=standard
+
 # Field separator for sacct --parsable2. The ASCII unit separator cannot appear
 # in a job name, a path or a submit line, unlike sacct's default "|".
 ER_DELIM=$'\x1f'
