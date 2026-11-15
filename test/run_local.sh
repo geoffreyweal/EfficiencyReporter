@@ -8,7 +8,8 @@
 #     run against the mock sacct.
 #
 # Needs Ruby with the gems in misc/Gemfile (sinatra, sinatra-contrib, rackup,
-# webrick), python3 and curl. It runs in Sinatra's development mode, so
+# sqlite3, webrick), python3 and curl. The seff reports it saves go in
+# test/.cache/data. It runs in Sinatra's development mode, so
 # changes to lib/ are picked up without a restart (as with Slurm Composer).
 #
 # Usage: test/run_local.sh [PORT]      then open http://localhost:PORT/
@@ -28,6 +29,7 @@ fi
 
 export PATH="$here/mock_cluster/bin:$PATH"
 export EFFICIENCY_REPORTER_CONF="$here/conf.local.yml.erb"
+export EFFICIENCY_REPORTER_DATA="$cache/data"
 export RACK_ENV="${RACK_ENV:-development}"
 
 echo "Efficiency Reporter on http://localhost:$port/ (Ctrl-C to stop)"

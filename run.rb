@@ -15,8 +15,11 @@
 #   POST /api/seff       seff reports for a batch of finished jobs
 #   GET  /api/job        sacct, seff and the batch script for one job
 #   GET  /api/profile    profile_plot's image for one job
+#   DELETE /api/reports  forget the saved seff reports
 #
-# The app stores nothing: every visit runs sacct and seff again.
+# seff's reports on finished jobs are kept in an SQLite database in data_dir
+# (lib/seff_store.rb), as Slurm Composer keeps its job history, so opening the
+# app again only runs seff on jobs it has not reported on yet.
 
 require "sinatra"
 require "sinatra/reloader" if ENV.fetch("RACK_ENV", "production") == "development"
@@ -31,6 +34,7 @@ require_relative "lib/ssh_key"
 require_relative "lib/profiling"
 require_relative "lib/sacct"
 require_relative "lib/seff"
+require_relative "lib/seff_store"
 
 set :environment, ENV.fetch("RACK_ENV", "production").to_sym
 set :host_authorization, { permitted_hosts: [] } if ENV.fetch("RACK_ENV", "production") == "development"
@@ -50,6 +54,9 @@ module EfficiencyReporter
   JOB_ID = /\A\d+(?:_\d+)?(?:\+\d+)?\z/.freeze
   RAW_ID = /\A\d+\z/.freeze
   MAX_JOBS_PER_SEFF_REQUEST = 500
+  # A seff report is saved only once the job has been over for this long, so
+  # that the last of its accounting has reached Slurm's database.
+  SETTLE_SECONDS = 600
 end
 
 helpers do
@@ -110,6 +117,43 @@ helpers do
     end
   end
 
+  # The saved seff reports, or nil if the sqlite3 gem is not installed.
+  def store
+    EfficiencyReporter::SeffStore.available? ? EfficiencyReporter::SeffStore.new(conf.data_dir) : nil
+  end
+
+  # Puts the saved seff reports on the jobs they belong to, and drops the
+  # ones no longer needed.
+  def attach_saved_reports(jobs, seff_version)
+    return unless store
+
+    saved = store.load(seff_version)
+    jobs.each do |job|
+      entry = saved[job["id"]]
+      job["seff"] = EfficiencyReporter::Seff.present(entry) if entry && entry["raw"].to_s == job["raw"].to_s
+    end
+    store.prune(jobs.map { |job| job["id"] }, seff_version) unless seff_version.to_s.empty?
+  rescue StandardError => e
+    warn "[Efficiency Reporter] could not read the saved seff reports: #{e.class}: #{e.message}"
+  end
+
+  # Saves the reports that will not change: seff ran cleanly, it found the
+  # numbers, and the job finished a while ago.
+  def save_reports(reports, entries)
+    return unless store
+
+    ends = entries.to_h { |e| [e["id"], e["end"]] }
+    settled_before = Time.now - EfficiencyReporter::SETTLE_SECONDS
+    keep = reports.select do |r|
+      finished = ends[r["id"]] && (Time.strptime(ends[r["id"]], "%Y-%m-%dT%H:%M:%S") rescue nil)
+      r["rc"].to_i.zero? && r["error"].nil? && !r["fp"].to_s.empty? &&
+        !EfficiencyReporter::Seff.parse(r["text"])["metrics"].empty? && finished && finished < settled_before
+    end
+    store.save(keep)
+  rescue StandardError => e
+    warn "[Efficiency Reporter] could not save seff reports: #{e.class}: #{e.message}"
+  end
+
   # A job as the browser sends it to /api/seff, checked.
   def seff_entry(job)
     return nil unless job.is_a?(Hash)
@@ -128,12 +172,12 @@ helpers do
     }
   end
 
-  def seff_report(result, id, raw)
+  def seff_report(result, id, raw, seff_version)
     text = result.text("seff")
     rc = result.rc("seff")
     stderr = result.text("seff.stderr").to_s
     report = { "id" => id, "raw" => raw, "text" => text.to_s.strip, "rc" => rc,
-               "error" => nil, "stderr" => nil, "fetched_at" => Time.now.to_i }
+               "error" => nil, "stderr" => nil, "fetched_at" => Time.now.to_i, "fp" => seff_version }
     if text.nil?
       report["error"] = "seff did not finish (the command was stopped)."
     elsif !rc&.zero?
@@ -174,7 +218,6 @@ get "/" do
     "batchSize" => conf.seff_batch_size,
     "thresholds" => conf.thresholds,
     "docs" => conf.docs,
-    "dashboardUrl" => conf.dashboard_url,
     "clusterName" => conf.cluster_name,
     "loginNode" => conf.remote? ? conf.login_node : "",
     "commands" => { "sacct" => conf.sacct_command, "seff" => conf.seff_command,
@@ -199,6 +242,7 @@ get "/api/jobs" do
   end
 
   jobs = EfficiencyReporter::Sacct.parse_jobs(result.text("jobs"))
+  attach_saved_reports(jobs, about["seff_fingerprint"])
 
   json_reply({
     "jobs" => jobs,
@@ -207,6 +251,7 @@ get "/api/jobs" do
       "ssh_key" => @ssh_key.to_s,
       "command" => result.command,
       "seconds" => result.seconds,
+      "saved_reports" => store ? store.path : "",
       "warnings" => Array(result.text("jobs.stderr")).reject { |w| w.strip.empty? }
     ),
     "range" => { "start" => sacct_time(start), "end" => sacct_time(finish) }
@@ -223,6 +268,7 @@ post "/api/seff" do
   outcome = EfficiencyReporter::Seff::Runner.new(runner, conf).run(entries, each_only: body["mode"] == "each")
   return json_reply({ "error" => "Could not run seff.", "detail" => outcome.transport_error }, 502) if outcome.transport_error
 
+  save_reports(outcome.results.values, entries)
   json_reply({
     "results" => outcome.results.transform_values { |r| EfficiencyReporter::Seff.present(r) },
     "batch_supported" => outcome.batch_supported,
@@ -248,8 +294,10 @@ get "/api/job" do
   profile = script["text"].each_line.filter_map { |line| EfficiencyReporter::Profiling.from_script_line(line) }.join(",")
   profile = EfficiencyReporter::Profiling.from_submit_line(job_row["SubmitLine"]) if profile.empty?
 
-  report = seff_report(result, id, raw)
+  seff_version = EfficiencyReporter::Seff.key_values(result.text("about"))["seff_fingerprint"].to_s
+  report = seff_report(result, id, raw, seff_version)
   report["profile"] = profile
+  save_reports([report], [{ "id" => id, "end" => EfficiencyReporter::Sacct.time(job_row["End"]) }])
 
   steps_error = result.rc("steps")&.zero? ? nil : result.text("steps.stderr").to_s.strip
   json_reply({
@@ -287,6 +335,11 @@ get "/api/profile" do
     headers "content-security-policy" => "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
   end
   bytes
+end
+
+delete "/api/reports" do
+  store&.clear
+  json_reply({ "ok" => true })
 end
 
 # Sinatra runs this for every 404, including /api/profile's own answer when

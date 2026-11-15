@@ -25,6 +25,14 @@ ensure_ssh_key: true
 ssh_key_type:   "ed25519"
 ssh_key_name:   "opencomposer"
 
+## Where the app keeps the seff reports it has saved, one directory per user.
+# seff's reports on finished jobs go in an SQLite database here
+# (seff_reports.db), as Slurm Composer keeps its job history, so opening the
+# app again only runs seff on jobs it has not reported on yet. Each report is
+# kept with a checksum of the seff program, and reports from a different seff
+# are dropped, so a change to seff shows up straight away.
+data_dir: <%= ENV['HOME'] %>/ondemand/data/sys/efficiency_reporter
+
 ## The commands, exactly as a user would type them on the login node.
 # The app shows what they print and never works out efficiency itself, so
 # whatever these commands report is what users see.
@@ -62,8 +70,7 @@ thresholds:
   serious: 20
 
 ## Layout
-cluster_name:  "Mahuika"
-dashboard_url: "/pun/sys/dashboard"   # the "OnDemand" link at the top
+cluster_name: "Mahuika"
 
 docs:
   efficiency: "https://docs.nesi.org.nz/Software/Profiling_and_Debugging/Finding_Job_Efficiency/"

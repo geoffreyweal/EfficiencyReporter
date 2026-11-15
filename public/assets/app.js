@@ -19,7 +19,10 @@
   const T = CONFIG.thresholds || { good: 70, warning: 40, serious: 20 };
   const CMD = CONFIG.commands || { sacct: 'sacct', seff: 'seff', profilePlot: 'profile_plot' };
   const DOCS = CONFIG.docs || {};
-  const CONCURRENCY = 2;
+  // seff runs on one batch of jobs at a time, starting with the most recent
+  // and working back. The first batch is small, so that the newest jobs'
+  // figures appear quickly.
+  const FIRST_BATCH = 20;
   const EACH_BATCH = 20;
 
   // Slurm states in which a job has not finished, so seff has nothing to say yet.
@@ -77,7 +80,7 @@
     panels: new Map(),
     details: new Map(),
     profiles: new Map(),
-    queue: { todo: [], inflight: 0, paused: false, error: null, mode: 'batch', batchSize: CONFIG.batchSize || 100 }
+    queue: { todo: [], inflight: 0, sent: 0, paused: false, error: null, mode: 'batch', batchSize: CONFIG.batchSize || 100 }
   };
 
   let shell = null;
@@ -113,8 +116,7 @@
   const ICONS = {
     chevron: 'M9 6l6 6-6 6',
     chart: 'M4 19V5M4 19h16M8 15l3-4 3 2 5-6',
-    refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6',
-    back: 'M15 18l-6-6 6-6'
+    refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6'
   };
 
   function icon(name, cls, title) {
@@ -350,21 +352,29 @@
 
   // ---- Running seff in the background ---------------------------------------
 
+  // Most recent first: by when each job finished (or started, or was
+  // submitted), then by job ID, newest first.
   function startQueue() {
     const q = S.queue;
-    q.todo = S.jobs.filter((job) => seffEligible(job) && !job.seff).sort((a, b) => b.lastMs - a.lastMs);
+    q.todo = S.jobs.filter((job) => seffEligible(job) && !job.seff)
+      .sort((a, b) => (b.lastMs - a.lastMs) || compareValues(b.sortId, a.sortId));
+    q.sent = 0;
     q.error = null;
     pump();
   }
 
+  // Sends the next batch once the one before has come back, so the reports
+  // arrive in order, newest to oldest.
   function pump() {
     const q = S.queue;
-    while (!q.paused && !q.error && q.inflight < CONCURRENCY && q.todo.length) {
-      const size = q.mode === 'each' ? Math.min(q.batchSize, EACH_BATCH) : q.batchSize;
+    if (!q.paused && !q.error && q.inflight === 0 && q.todo.length) {
+      let size = q.mode === 'each' ? Math.min(q.batchSize, EACH_BATCH) : q.batchSize;
+      if (q.sent === 0) size = Math.min(size, FIRST_BATCH);
       const batch = q.todo.splice(0, size);
-      q.inflight += 1;
+      q.sent += 1;
+      q.inflight = 1;
       runBatch(batch).finally(() => {
-        q.inflight -= 1;
+        q.inflight = 0;
         pump();
       });
     }
@@ -551,7 +561,6 @@
       const refresh = el('button', { class: 'btn', type: 'button', id: 'refresh-button', onclick: () => loadJobs() },
         icon('refresh'), 'Refresh');
       nav.append(refresh);
-      if (CONFIG.dashboardUrl) nav.append(el('a', { class: 'btn', href: CONFIG.dashboardUrl }, icon('back'), 'OnDemand'));
     }
     const button = document.getElementById('refresh-button');
     if (button) button.disabled = S.status === 'loading';
@@ -729,7 +738,7 @@
     }
     const label = q.paused
       ? `Paused: seff has reported on ${fmtInt(done)} of ${fmtInt(eligible)} finished jobs.`
-      : `Running seff on your finished jobs: ${fmtInt(done)} of ${fmtInt(eligible)}…`;
+      : `Running seff on your finished jobs, newest first: ${fmtInt(done)} of ${fmtInt(eligible)}…`;
     box.replaceChildren(
       q.paused ? null : el('span', { class: 'spinner', 'aria-hidden': 'true' }),
       el('span', null, label),
@@ -1304,9 +1313,22 @@
       ['Commands run on', a.host ? `${a.host}${a.login_node ? ` (via ${a.login_node})` : ''}` : a.login_node],
       ['SSH key', SSH_KEY[a.ssh_key] === undefined ? a.ssh_key : SSH_KEY[a.ssh_key]],
       ['sacct', a.sacct], ['seff', a.seff], ['profile_plot', a.profile_plot], ['Slurm', a.slurm],
-      ['Jobs listed in', a.seconds ? `${a.seconds} s` : '']
+      ['Jobs listed in', a.seconds ? `${a.seconds} s` : ''],
+      ['Saved seff reports', a.saved_reports || 'not saved (the sqlite3 gem is not installed)']
     ].filter(([, value]) => value);
     const missing = ['seff', 'profile_plot'].filter((tool) => a.user && !a[tool]);
+
+    const forget = el('button', { class: 'btn btn-small', type: 'button', disabled: !a.saved_reports },
+      'Forget saved seff reports');
+    forget.addEventListener('click', async () => {
+      forget.disabled = true;
+      try {
+        await api('api/reports', { method: 'DELETE' });
+        forget.textContent = 'Forgotten: refresh to run seff on every job again';
+      } catch (err) {
+        forget.textContent = `Could not forget them: ${err.message}`;
+      }
+    });
 
     append(shell.about, [
       el('summary', null, 'About these numbers'),
@@ -1314,12 +1336,14 @@
         el('p', null, 'Each job’s efficiency is exactly what ', code(CMD.seff), ' reports for it, run as you on the cluster. ',
           'Opening a job runs seff again and shows its report as printed, along with sacct’s view of the job and its steps, ',
           'its batch script and, for jobs run with ', code('--profile task'), ', the chart from ', code(CMD.profilePlot), '.'),
-        el('p', null, 'Nothing is stored: every visit to this page runs sacct and seff again.'),
+        el('p', null, 'seff’s reports on finished jobs are saved, so next time seff only runs on jobs it has not ',
+          'reported on yet. They are dropped automatically whenever seff itself changes.'),
         el('p', null, 'Read more: ', link(DOCS.efficiency, 'Finding Job Efficiency'), ' · ',
           link(DOCS.profiling, 'Slurm Native Profiling'), ' · ', link(DOCS.scaling, 'Job Scaling')),
         missing.length ? el('p', { class: 'error-text' }, `Not found on the cluster: ${missing.join(', ')}.`) : null,
         facts.length ? el('dl', { class: 'facts' }, facts.flatMap(([k, v]) => [el('dt', null, k), el('dd', null, code(String(v)))])) : null,
-        Array.isArray(a.warnings) && a.warnings.length ? el('pre', { class: 'output' }, a.warnings.join('\n')) : null)
+        Array.isArray(a.warnings) && a.warnings.length ? el('pre', { class: 'output' }, a.warnings.join('\n')) : null,
+        el('p', null, forget))
     ]);
   }
 

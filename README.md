@@ -44,13 +44,16 @@ loosely so that a change to `seff`'s wording does not break it.
 
 1. **`sacct`** lists the user's jobs over the last `history_months`
    (`remote/list_jobs.sh`).
-2. **`seff`** is run on the finished jobs in the background, newest first, about
-   100 jobs per call (`seff` reports on every job it is given, one after
-   another), filling the list in as the reports arrive (`remote/seff.sh`). If
-   `seff` fails part-way through a call, the jobs it had reported on are kept and
-   the rest are run one at a time, so one job `seff` cannot report on never
-   hides the others. The same call reads the jobs' batch scripts
-   (`sacct --batch-script`) for `--profile`, so the list can mark profiled jobs.
+2. **`seff`** is run in the background on the finished jobs it has no saved
+   report for, one call at a time, starting with the most recent jobs and
+   working back: 20 jobs in the first call, so the newest figures appear
+   quickly, then about 100 per call (`seff` reports on every job it is given,
+   one after another). The list fills in as the reports arrive
+   (`remote/seff.sh`). If `seff` fails part-way through a call, the jobs it had
+   reported on are kept and the rest are run one at a time, so one job `seff`
+   cannot report on never hides the others. The same call reads the jobs'
+   batch scripts (`sacct --batch-script`) for `--profile`, so the list can mark
+   profiled jobs.
 3. **Opening a job** runs `sacct` and `seff` on it again, and `sacct
    --batch-script` (`remote/job_details.sh`). If it ran with `--profile task`,
    `profile_plot JOBID` is run in an empty temporary directory and the image it
@@ -62,7 +65,9 @@ The app is built like Slurm Composer: a Sinatra app, with its settings in
 Slurm Composer, the commands run on a login node as the user, with
 `ssh_wrapper` put in front of them. Each script is sent base64-encoded and run
 with `bash -s`, and its output comes back in marked sections, so whatever the
-user's shell start-up files print is ignored.
+user's shell start-up files print is ignored. Any temporary files a script
+makes on the login node go in one folder, which is removed however the script
+ends, even if it is cut off part-way.
 
 Passwordless SSH is set up exactly as Slurm Composer does it, with the same
 settings and the same key (`~/.ssh/opencomposer_ed25519`), so the two apps
@@ -72,14 +77,22 @@ authorises it, and adds an `IdentityFile` line for it to `~/.ssh/config`. Home
 directories are shared with the login nodes, so that is all `ssh` needs. A key
 the user already owns is never authorised on their behalf.
 
-The app stores nothing. Every visit runs `sacct` and `seff` again, so the page
-always shows what they report now.
+`seff`'s reports on finished jobs are saved in an SQLite database in the
+user's `data_dir` (`seff_reports.db`), as Slurm Composer keeps its job history,
+so opening the app again only runs `seff` on jobs it has not reported on yet.
+Only clean reports on jobs that finished more than 10 minutes ago are saved, so
+that the last of their accounting has reached Slurm's database. Each report is
+saved with a checksum of the `seff` program, and reports from a different
+`seff` are dropped, so a change to `seff` on the cluster shows up straight
+away. Opening a job always runs `seff` on it again, and "About these numbers",
+at the bottom of the page, can forget all the saved reports.
 
 ## Requirements
 
 - Open OnDemand 3 or later, with the gems in `misc/Gemfile` (`sinatra`,
-  `sinatra-contrib`, `rackup`, `webrick`): the same as Slurm Composer, less
-  `sqlite3`. Where Slurm Composer runs, these are already installed.
+  `sinatra-contrib`, `rackup`, `sqlite3`, `webrick`): the same as Slurm
+  Composer. Where Slurm Composer runs, these are already installed. Without
+  `sqlite3` the app still works, but runs `seff` on every job on each visit.
 - `ssh`, `ssh-keygen` and `bash` on the OnDemand host, with home directories
   shared with the login nodes.
 - On the login nodes: `sacct`, `seff` and `profile_plot` (from `/opt/nesi/bin`),
@@ -126,6 +139,7 @@ run through ERB first, so values can use `ENV`. Every setting has a default.
 | `login_node` | `login.hpc.nesi.org.nz` | The host the commands run on, as shown on the page. |
 | `ssh_wrapper` | `ssh -o BatchMode=yes -o ConnectTimeout=20 login.hpc.nesi.org.nz` | Put in front of every command, as in Slurm Composer. `""` runs them on the OnDemand host. BatchMode stops `ssh` from ever waiting for a password. |
 | `ensure_ssh_key`, `ssh_key_type`, `ssh_key_name` | `true`, `ed25519`, `opencomposer` | Slurm Composer's SSH key check (see above). With the same values as Slurm Composer, the two apps share one key. |
+| `data_dir` | `~/ondemand/data/sys/efficiency_reporter` | Where each user's saved `seff` reports are kept (`seff_reports.db`). |
 | `commands` | `sacct`, `seff`, `profile_plot` | The commands, exactly as a user would type them. |
 | `extra_path` | `/opt/nesi/bin` | Added to the end of `PATH` on the login node. |
 | `history_months` | `3` | How many months of jobs to show. |
@@ -133,7 +147,7 @@ run through ERB first, so values can use `ENV`. Every setting has a default.
 | `detect_profiling` | `true` | Search batch scripts for `--profile` to mark profiled jobs in the list. |
 | `command_timeout` | `120` | Seconds any one command may take. |
 | `thresholds` | `70 / 40 / 20` | Percentages at which a figure turns from green to amber, orange and red. |
-| `cluster_name`, `dashboard_url`, `docs` | | Text and links shown on the page. |
+| `cluster_name`, `docs` | | Text and links shown on the page. |
 
 ## Checking it on Mahuika
 
@@ -158,9 +172,9 @@ OnDemand, against a mock cluster:
   against the mock `sacct`.
 
 ```sh
-gem install sinatra sinatra-contrib rackup webrick   # once (misc/Gemfile)
-test/run_local.sh                                    # then open http://localhost:9393/
-ruby test/test_app.rb                                # the tests (the API tests need test/run_local.sh to have run once)
+gem install sinatra sinatra-contrib rackup sqlite3 webrick   # once (misc/Gemfile)
+test/run_local.sh                                            # then open http://localhost:9393/
+ruby test/test_app.rb                                        # the tests (the API tests need test/run_local.sh to have run once)
 ```
 
 `test/run_local.sh` runs Sinatra in development mode, so changes to `lib/` are
@@ -184,6 +198,7 @@ lib/
   sacct.rb              reads sacct's output
   seff.rb               reads seff's output; runs seff in batches, with the fallback
   profiling.rb          finds --profile in batch scripts and submit lines
+  seff_store.rb         the saved seff reports (SQLite)
 remote/                 the bash scripts run on the login node
 views/index.erb         the page
 public/assets/          the page's JavaScript, CSS and icon

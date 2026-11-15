@@ -11,7 +11,9 @@
 er_main() {
   local id=$1 dir rc file="" candidate
 
-  if ! dir=$(mktemp -d "${TMPDIR:-/tmp}/er_profile.XXXXXX" 2>/dev/null); then
+  # Inside the script's temporary directory (see common.sh), so it is
+  # removed even if profile_plot is stopped part-way.
+  if [ -z "$ER_TMP" ] || ! dir=$(mktemp -d "$ER_TMP/profile.XXXXXX" 2>/dev/null); then
     er_begin result
     printf 'rc=1\nerror=could not make a temporary directory\n'
     er_end result 1
@@ -48,6 +50,4 @@ er_main() {
     base64 <"$dir/.stdout"
     er_end image 0
   fi
-
-  rm -rf "$dir"
 }

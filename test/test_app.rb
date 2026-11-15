@@ -20,6 +20,7 @@ require File.join(APP_DIR, "lib/ssh_key")
 require File.join(APP_DIR, "lib/profiling")
 require File.join(APP_DIR, "lib/sacct")
 require File.join(APP_DIR, "lib/seff")
+require File.join(APP_DIR, "lib/seff_store")
 
 module EfficiencyReporter
   # seff's output today (from REANNZ's GPU workshop), as seff prints it.
@@ -217,12 +218,13 @@ module EfficiencyReporter
 
     def test_one_call_for_many_jobs
       fake = FakeRunner.new do |batch, _each, _scripts|
-        { "seff" => { text: batch.split(",").map { |id| report(id) }.join("\n\n"), rc: 0 } }
+        { "about" => { text: "seff_fingerprint=1-2", rc: 0 },
+          "seff" => { text: batch.split(",").map { |id| report(id) }.join("\n\n"), rc: 0 } }
       end
       outcome = Seff::Runner.new(fake, config).run(entries(1, 2, 3))
       assert_equal 1, fake.calls.length
       assert_equal %w[1 2 3], outcome.results.keys.sort
-      assert(outcome.results.values.all? { |r| r["error"].nil? && r["fetched_at"].is_a?(Integer) })
+      assert(outcome.results.values.all? { |r| r["error"].nil? && r["fetched_at"].is_a?(Integer) && r["fp"] == "1-2" })
       assert outcome.batch_supported
     end
 
@@ -271,6 +273,43 @@ module EfficiencyReporter
       jobs[1]["elapsed_s"] = 0
       Seff::Runner.new(fake, config).run(jobs)
       assert_equal ["1", "2", ""], fake.calls[0][1]
+    end
+  end
+
+  class SeffStoreTest < Minitest::Test
+    def setup
+      skip "the sqlite3 gem is not installed" unless SeffStore.available?
+      @dir = Dir.mktmpdir
+      @store = SeffStore.new(File.join(@dir, "data"))
+    end
+
+    def teardown
+      FileUtils.rm_rf(@dir) if @dir
+    end
+
+    def report(id, version, text = "Job ID: #{id}")
+      { "id" => id, "raw" => id, "text" => text, "profile" => nil, "fp" => version, "fetched_at" => 1_700_000_000 }
+    end
+
+    def test_saves_and_loads_by_seff_version
+      assert_equal({}, @store.load("v1"))
+      @store.save([report("1", "v1"), report("2", "v1"), report("3", "v2")])
+      @store.save([report("1", "v1", "Job ID: 1 again")])
+      saved = @store.load("v1")
+      assert_equal %w[1 2], saved.keys.sort
+      assert_equal "Job ID: 1 again", saved["1"]["text"]
+      assert_equal 1_700_000_000, saved["1"]["fetched_at"]
+      assert_equal %w[3], @store.load("v2").keys
+      assert_equal 3, @store.count
+    end
+
+    def test_prune_and_clear
+      @store.save([report("1", "v1"), report("2", "v1"), report("3", "v2")])
+      @store.prune(%w[1 3], "v1")
+      assert_equal %w[1], @store.load("v1").keys, "job 2 is no longer listed; job 3 is from another seff"
+      assert_equal 1, @store.count
+      @store.clear
+      assert_equal 0, @store.count
     end
   end
 
@@ -350,14 +389,18 @@ module EfficiencyReporter
       skip "NeSI's seff is not in test/.cache (run test/run_local.sh once)" unless File.exist?(NN_SEFF)
       require File.join(APP_DIR, "run")
       Sinatra::Application.set :run, false
-      @old_env = ENV.to_h.slice("PATH", "EFFICIENCY_REPORTER_CONF")
+      @data = Dir.mktmpdir
+      @old_env = ENV.to_h.slice("PATH", "EFFICIENCY_REPORTER_CONF", "EFFICIENCY_REPORTER_DATA")
       ENV["PATH"] = "#{MOCK_BIN}:#{ENV['PATH']}"
       ENV["EFFICIENCY_REPORTER_CONF"] = File.join(APP_DIR, "test/conf.local.yml.erb")
+      ENV["EFFICIENCY_REPORTER_DATA"] = @data
+      Conf::CACHE[:path] = nil # read the settings again, with this test's data_dir
       @app = Rack::MockRequest.new(Sinatra::Application)
     end
 
     def teardown
-      %w[PATH EFFICIENCY_REPORTER_CONF].each { |k| ENV[k] = @old_env[k] } if @old_env
+      %w[PATH EFFICIENCY_REPORTER_CONF EFFICIENCY_REPORTER_DATA].each { |k| ENV[k] = @old_env[k] } if @old_env
+      FileUtils.rm_rf(@data) if @data
     end
 
     def get_json(path)
@@ -407,7 +450,18 @@ module EfficiencyReporter
       assert_equal "task", good["profile"]
       assert_equal %w[cpu mem time], good["metrics"].map { |m| m["kind"] }.uniq.sort
 
-      # Nothing is stored: the next visit gets no reports with the job list.
+      # The clean reports come back with the job list next time, from the
+      # SQLite database, so seff does not have to run on them again.
+      skip "the sqlite3 gem is not installed" unless SeffStore.available?
+      assert File.exist?(File.join(@data, SeffStore::FILE))
+      again = jobs.select { |j| j["seff"] }
+      assert_operator again.length, :>=, 50
+      refute(again.any? { |j| j["name"] == "node_glitch" }, "a failed report is not saved")
+      assert_equal "task", again.find { |j| j["name"] == "profile_me" }["seff"]["profile"]
+
+      # Forgetting them means seff runs on every job again.
+      response = @app.delete("/api/reports")
+      assert_equal 200, response.status
       refute(jobs.any? { |j| j.key?("seff") })
     end
 

@@ -21,6 +21,8 @@ module EfficiencyReporter
       "ensure_ssh_key" => false,
       "ssh_key_type" => "ed25519",
       "ssh_key_name" => "opencomposer",
+      # Where the saved seff reports are kept (an SQLite database).
+      "data_dir" => nil,
       # The commands, as a user would type them.
       "commands" => { "sacct" => "sacct", "seff" => "seff", "profile_plot" => "profile_plot" },
       "extra_path" => "",
@@ -29,7 +31,6 @@ module EfficiencyReporter
       "detect_profiling" => true,
       "command_timeout" => 120,
       "cluster_name" => "",
-      "dashboard_url" => "/pun/sys/dashboard",
       "thresholds" => { "good" => 70, "warning" => 40, "serious" => 20 },
       "docs" => {
         "efficiency" => "https://docs.nesi.org.nz/Software/Profiling_and_Debugging/Finding_Job_Efficiency/",
@@ -114,6 +115,11 @@ module EfficiencyReporter
       value.empty? ? DEFAULTS["commands"][name] : value
     end
 
+    def data_dir
+      given = @values["data_dir"].to_s.strip
+      given.empty? ? File.join(Dir.home, "ondemand", "data", "sys", File.basename(APP_ROOT)) : given
+    end
+
     def sacct_command
       command("sacct")
     end
@@ -148,10 +154,6 @@ module EfficiencyReporter
 
     def cluster_name
       @values["cluster_name"].to_s
-    end
-
-    def dashboard_url
-      @values["dashboard_url"].to_s
     end
 
     def thresholds

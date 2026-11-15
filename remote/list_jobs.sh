@@ -4,7 +4,8 @@
 #   START, END   times sacct understands, e.g. 2026-08-15T00:00:00
 #
 # Sections:
-#   about   user, host, where sacct/seff/profile_plot are, Slurm's version
+#   about   user, host, where sacct/seff/profile_plot are, seff's checksum,
+#           Slurm's version
 #   jobs    sacct --allocations --parsable2 output, with a header line
 
 er_main() {
@@ -17,6 +18,7 @@ er_main() {
   printf 'sacct=%s\n' "$(command -v "${ER_SACCT[0]}" 2>/dev/null)"
   printf 'seff=%s\n' "$(command -v "${ER_SEFF[0]}" 2>/dev/null)"
   printf 'profile_plot=%s\n' "$(command -v "${ER_PROFILE_PLOT[0]}" 2>/dev/null)"
+  printf 'seff_fingerprint=%s\n' "$(er_fingerprint "${ER_SEFF[0]}")"
   printf 'slurm=%s\n' "$("${ER_SACCT[@]}" --version 2>/dev/null)"
   er_end about 0
 

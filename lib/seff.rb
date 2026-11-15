@@ -84,7 +84,7 @@ module EfficiencyReporter
       end
     end
 
-    # A result, as the browser gets it.
+    # A saved or fresh result, as the browser gets it.
     def present(entry)
       parsed = parse(entry["text"])
       {
@@ -126,7 +126,8 @@ module EfficiencyReporter
     #    same happens to jobs it printed nothing for, which also covers a seff
     #    that only reports on the first job it is given.
     class Runner
-      Outcome = Struct.new(:results, :batch_supported, :calls, :seconds, :transport_error, keyword_init: true)
+      Outcome = Struct.new(:results, :batch_supported, :calls, :seconds, :fingerprint, :transport_error,
+                           keyword_init: true)
 
       def initialize(command_runner, config)
         @command_runner = command_runner
@@ -147,9 +148,11 @@ module EfficiencyReporter
         calls << first
         if first.transport_error
           return Outcome.new(results: {}, batch_supported: !each_only, calls: 1, seconds: first.seconds,
-                             transport_error: first.transport_error)
+                             fingerprint: nil, transport_error: first.transport_error)
         end
 
+        # A checksum of the seff program, saved with each report.
+        fingerprint = Seff.key_values(first.text("about"))["seff_fingerprint"].to_s
         leftovers, batch_supported = read_batch(first, batch, lookup, results)
         batch_supported = false if each_only
         each.each { |entry| results[entry["id"]] = read_each(first, entry) }
@@ -169,9 +172,12 @@ module EfficiencyReporter
 
         attach_profiles(results, entries, Profiling.from_scripts(first.text("scripts"))) unless script_ids.empty?
         now = Time.now.to_i
-        results.each_value { |r| r["fetched_at"] = now }
+        results.each_value do |r|
+          r["fetched_at"] = now
+          r["fp"] = fingerprint
+        end
         Outcome.new(results: results, batch_supported: batch_supported, calls: calls.length,
-                    seconds: calls.sum(&:seconds).round(2), transport_error: nil)
+                    seconds: calls.sum(&:seconds).round(2), fingerprint: fingerprint, transport_error: nil)
       end
 
       private
