@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""A mock sacct, for running the Efficiency Reporter app without a cluster.
+
+It answers the sacct calls the app and NeSI's seff make, from the made-up jobs
+in ../jobs.py:
+
+  sacct --helpformat | --version
+  sacct [--allocations] --parsable2 --delimiter=X --format=... (--jobs=IDS | --starttime=S --endtime=E)
+  sacct --batch-script --jobs=IDS
+  sacct --json=data_parser/v0.0.43 -j IDS        (what seff runs)
+  sacct -X -n -j ID --format jobidraw              (what profile_plot runs)
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import jobs as J  # noqa: E402
+
+FIELDS = """Account AdminComment AllocCPUS AllocNodes AllocTRES AssocID AveCPU AveCPUFreq AveDiskRead
+AveDiskWrite AvePages AveRSS AveVMSize BlockID Cluster Comment Constraints ConsumedEnergy CPUTime CPUTimeRAW
+DerivedExitCode Elapsed ElapsedRaw Eligible End ExitCode Flags GID Group JobID JobIDRaw JobName Layout
+MaxDiskRead MaxDiskWrite MaxRSS MaxVMSize MinCPU NCPUS NNodes NodeList NTasks Partition Priority QOS Reason
+ReqCPUS ReqMem ReqNodes ReqTRES Reservation Start State StdErr StdOut Submit SubmitLine SystemCPU Timelimit
+TimelimitRaw TotalCPU UID User UserCPU WCKey WorkDir""".split()
+KNOWN = {f.lower(): f for f in FIELDS}
+
+
+def fail(message):
+    print(f"sacct: error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def parse_args(argv):
+    opts = {"format": None, "jobs": None, "allocations": False, "delimiter": "|", "json": None,
+            "batch_script": False, "noheader": False, "starttime": None, "endtime": None, "user": None,
+            "helpformat": False, "version": False}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+
+        def value():
+            nonlocal i
+            if arg.startswith("--") and "=" in arg:
+                return arg.split("=", 1)[1]
+            i += 1
+            if i >= len(argv):
+                fail(f"option '{arg}' requires an argument")
+            return argv[i]
+
+        name = arg.split("=", 1)[0]
+        if name in ("-X", "--allocations"):
+            opts["allocations"] = True
+        elif name in ("-P", "--parsable2", "-p", "--parsable"):
+            pass
+        elif name in ("-n", "--noheader"):
+            opts["noheader"] = True
+        elif name in ("-B", "--batch-script"):
+            opts["batch_script"] = True
+        elif name in ("-e", "--helpformat"):
+            opts["helpformat"] = True
+        elif name in ("-V", "--version"):
+            opts["version"] = True
+        elif name == "--json":
+            opts["json"] = arg.split("=", 1)[1] if "=" in arg else "default"
+        elif name == "--delimiter":
+            opts["delimiter"] = value()
+        elif name in ("-o", "--format"):
+            opts["format"] = value()
+        elif name in ("-j", "--jobs"):
+            opts["jobs"] = value()
+        elif name in ("-S", "--starttime"):
+            opts["starttime"] = value()
+        elif name in ("-E", "--endtime"):
+            opts["endtime"] = value()
+        elif name in ("-u", "--user"):
+            opts["user"] = value()
+        elif name in ("-M", "--clusters"):
+            value()
+        else:
+            fail(f"unrecognized option '{arg}'")
+        i += 1
+    return opts
+
+
+def to_epoch(text):
+    import datetime as dt
+    if not text or text == "now":
+        return 10 ** 12
+    return int(dt.datetime.strptime(text[:19], "%Y-%m-%dT%H:%M:%S").timestamp())
+
+
+def select(opts):
+    if opts["jobs"]:
+        chosen = []
+        for wanted in opts["jobs"].split(","):
+            wanted = wanted.strip()
+            matches = [j for j in J.JOBS if j["id"] == wanted or str(j["raw"]) == wanted
+                       or (j["array"] and str(j["array"][0]) == wanted)]
+            for j in matches:
+                if j not in chosen:
+                    chosen.append(j)
+        return chosen
+    start, end = to_epoch(opts["starttime"]), to_epoch(opts["endtime"])
+    return [j for j in J.JOBS
+            if (j["end"] or 10 ** 12) >= start and (j["start"] or j["submit"]) <= end]
+
+
+def state_text(job):
+    if job["state"] == "CANCELLED":
+        return "CANCELLED by 31234"
+    return job["state"]
+
+
+def job_values(job):
+    started = job["start"] is not None
+    nodelist = "None assigned" if not started else ("c[001-002]" if job["nodes"] > 1 else "c001")
+    steps = J.step_records(job)
+    cpu_total = sum(s[2] for s in steps)
+    return {
+        "JobID": job["id"], "JobIDRaw": str(job["raw"]), "JobName": job["name"], "State": state_text(job),
+        "Partition": job["partition"], "Account": J.ACCOUNT, "QOS": "normal", "User": J.USER,
+        "AllocCPUS": str(job["cpus"]), "NCPUS": str(job["cpus"]), "AllocTRES": J.alloc_tres(job),
+        "ReqMem": J.mem_text(job["mem_mb"]), "NNodes": str(job["nodes"]), "NodeList": nodelist,
+        "Submit": J.iso(job["submit"]), "Start": J.iso(job["start"]) if started else (
+            "Unknown" if job["state"] == "PENDING" else "None"),
+        "End": J.iso(job["end"]) if job["end"] else "Unknown",
+        "Elapsed": J.duration(job["elapsed"]), "ElapsedRaw": str(job["elapsed"]),
+        "Timelimit": J.duration(job["limit_min"] * 60), "TimelimitRaw": str(job["limit_min"]),
+        "ExitCode": job["exit_code"], "WorkDir": job["workdir"], "SubmitLine": job["submit_line"],
+        "Reason": "None" if started else "Priority", "TotalCPU": J.duration(cpu_total), "Cluster": J.CLUSTER,
+    }
+
+
+def step_values(job, step):
+    name, ntasks, cpu_s, rss, start, end = step
+    per_task_rss = int(rss / max(1, ntasks) / 1024)
+    return {
+        "JobID": f"{job['id']}.{name}", "JobIDRaw": f"{job['raw']}.{name}",
+        "JobName": name if name in ("batch", "extern") else "python",
+        "State": job["state"] if name != "extern" else "COMPLETED", "ExitCode": job["exit_code"],
+        "Elapsed": J.duration(end - start), "AllocCPUS": str(job["cpus"]), "NTasks": str(ntasks),
+        "NNodes": str(job["nodes"]), "TotalCPU": J.duration(cpu_s), "AveCPU": J.duration(cpu_s / max(1, ntasks)),
+        "MinCPU": J.duration(cpu_s / max(1, ntasks) * 0.9), "MaxRSS": f"{int(per_task_rss * 1.1)}K",
+        "AveRSS": f"{per_task_rss}K", "MaxDiskRead": "1.25M", "MaxDiskWrite": "0.42M",
+        "NodeList": "c[001-002]" if job["nodes"] > 1 else "c001", "Start": J.iso(start), "End": J.iso(end),
+    }
+
+
+def print_table(opts, chosen):
+    fields = []
+    for f in (opts["format"] or "JobID,JobName,State").split(","):
+        f = f.strip().split("%")[0]
+        if f.lower() not in KNOWN:
+            fail(f'Invalid field requested: "{f}"')
+        fields.append(KNOWN[f.lower()])
+    delim = opts["delimiter"]
+    out = []
+    if not opts["noheader"]:
+        out.append(delim.join(fields))
+    for job in chosen:
+        values = job_values(job)
+        out.append(delim.join(values.get(f, "") for f in fields))
+        if not opts["allocations"]:
+            for step in J.step_records(job):
+                sv = step_values(job, step)
+                out.append(delim.join(sv.get(f, "") for f in fields))
+    print("\n".join(out))
+
+
+def tres(kind, name, count, task=0):
+    return {"type": kind, "name": name, "id": 0, "count": int(count), "task": task, "node": ""}
+
+
+def json_job(job):
+    allocated = []
+    if job["cpus"]:
+        allocated = [tres("cpu", "", job["cpus"]), tres("mem", "", job["mem_mb"]), tres("node", "", job["nodes"]),
+                     tres("billing", "", job["cpus"])]
+        if job["gpus"]:
+            kind, count = job["gpus"]
+            allocated += [tres("gres", "gpu", count), tres("gres", f"gpu:{kind}", count)]
+    steps = []
+    for name, ntasks, cpu_s, rss, start, end in J.step_records(job):
+        total = [tres("cpu", "", cpu_s * 1000), tres("mem", "", rss)]
+        if job["gpus"] and name in ("batch", "0"):
+            kind = job["gpus"][0]
+            total += [tres("gres", "gpuutil", job["gpu_util"] * 100),
+                      tres("gres", "gpumem", job["gpu_mem_eff"] * J.GPU_MEM_GB[kind] * 1024 ** 3)]
+        per_task = rss / max(1, ntasks)
+        steps.append({
+            "step": {"id": f"{job['raw']}.{name}", "name": name},
+            "time": {"start": {"number": start, "set": True}, "end": {"number": end, "set": True},
+                     "elapsed": end - start},
+            "tasks": {"count": ntasks},
+            "state": [job["state"]],
+            "tres": {"requested": {
+                "total": total,
+                "min": [tres("mem", "", per_task * 0.8)],
+                "max": [tres("mem", "", per_task * 1.1)],
+                "average": [tres("mem", "", per_task)],
+            }},
+        })
+    array = {"job_id": 0, "task_id": {"number": 0, "set": False, "infinite": False}}
+    if job["array"]:
+        array = {"job_id": job["array"][0], "task_id": {"number": job["array"][1], "set": True, "infinite": False}}
+    return {
+        "job_id": job["raw"], "name": job["name"], "account": J.ACCOUNT, "cluster": J.CLUSTER,
+        "partition": job["partition"], "association": {"user": J.USER, "account": J.ACCOUNT},
+        "state": {"current": [job["state"]], "reason": "None"},
+        "allocation_nodes": job["nodes"] if job["start"] else 0,
+        "time": {"elapsed": job["elapsed"], "limit": {"number": job["limit_min"], "set": True, "infinite": False},
+                 "start": job["start"] or 0, "end": job["end"] or 0, "submission": job["submit"]},
+        "array": array,
+        "tres": {"allocated": allocated, "requested": allocated},
+        "steps": steps,
+        "exit_code": {"status": ["SUCCESS"], "return_code": {"number": 0, "set": True}},
+    }
+
+
+def main():
+    opts = parse_args(sys.argv[1:])
+    if opts["helpformat"]:
+        for i in range(0, len(FIELDS), 6):
+            print("".join(f"{f:<20}" for f in FIELDS[i:i + 6]).rstrip())
+        return
+    if opts["version"]:
+        print("slurm 25.05.4")
+        return
+    chosen = select(opts)
+    if opts["json"]:
+        print(json.dumps({"meta": {"plugin": {"data_parser": opts["json"]}}, "jobs": [json_job(j) for j in chosen],
+                          "errors": [], "warnings": []}))
+        return
+    if opts["batch_script"]:
+        for job in chosen:
+            if not opts["noheader"]:
+                print(f"Batch Script for {job['id']}")
+                print("-" * 80)
+            sys.stdout.write(job["script"] if job["script"] else "NONE\n")
+        return
+    print_table(opts, chosen)
+
+
+if __name__ == "__main__":
+    main()

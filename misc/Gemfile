@@ -1,0 +1,12 @@
+# frozen_string_literal: true
+
+# The gems the app needs, as for Slurm Composer. To install them for the app
+# (as the administrator), from the app's directory:
+#   cp misc/Gemfile . && bundle install
+
+source "https://rubygems.org"
+
+gem "sinatra"
+gem "sinatra-contrib"
+gem "rackup"
+gem "webrick"

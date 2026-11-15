@@ -1,0 +1,10 @@
+---
+# Settings for running the app on your own computer with test/run_local.sh:
+# commands run locally (no ssh_wrapper), against the mock cluster in
+# test/mock_cluster.
+ssh_wrapper: ""
+ensure_ssh_key: false
+extra_path: ""
+data_dir: <%= ENV['EFFICIENCY_REPORTER_DATA'] %>
+cluster_name: "a mock cluster"
+dashboard_url: ""

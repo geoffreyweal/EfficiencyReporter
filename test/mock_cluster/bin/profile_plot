@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""A mock profile_plot: "profile_plot JOBID" writes JOBID_profile.png, a plain
+chart of made-up usage, for the jobs in ../jobs.py that ran with --profile task
+in the last 30 days, and fails like the real one for any other job.
+"""
+
+import math
+import os
+import random
+import struct
+import sys
+import zlib
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import jobs as J  # noqa: E402
+
+args = [a for a in sys.argv[1:] if not a.startswith("-")]
+if not args:
+    print("Usage:\n  profile_plot [options] JOBID", file=sys.stderr)
+    sys.exit(1)
+
+job_id = args[-1]
+job = J.find(job_id)
+profiled = job and job["profile"] in ("script", "submit")
+fresh = job and (job["end"] is None or job["end"] > J.anchor() - 30 * 86400)
+if not (profiled and fresh):
+    sys.stderr.write(f"Profile server replied: No profile data found for job {job_id}\n")
+    sys.exit(1)
+
+sys.stderr.write("Altair not found, so rendering remotely. Time zone may differ.\n")
+
+W, PANEL = 640, 150
+panels = ["cpu", "mem", "io"] + (["gpu", "gpumem"] if job["gpus"] else [])
+H = PANEL * len(panels)
+pixels = bytearray([255]) * (W * H * 3)
+COLOURS = [(42, 120, 214), (235, 104, 52), (27, 175, 122), (237, 161, 0), (98, 80, 214)]
+
+
+def dot(x, y, colour):
+    if 0 <= x < W and 0 <= y < H:
+        i = (y * W + x) * 3
+        pixels[i:i + 3] = bytes(colour)
+
+
+def line(x0, y0, x1, y1, colour, width=2):
+    steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+    for s in range(steps + 1):
+        x = round(x0 + (x1 - x0) * s / steps)
+        y = round(y0 + (y1 - y0) * s / steps)
+        for dx in range(width):
+            for dy in range(width):
+                dot(x + dx, y + dy, colour)
+
+
+rng = random.Random(job["raw"])
+for p, _name in enumerate(panels):
+    top = p * PANEL
+    left, right, bottom = 50, W - 15, top + PANEL - 25
+    line(left, top + 15, left, bottom, (195, 194, 183), 1)
+    line(left, bottom, right, bottom, (195, 194, 183), 1)
+    for g in range(1, 4):
+        y = bottom - g * (bottom - top - 15) // 4
+        line(left + 1, y, right, y, (235, 234, 228), 1)
+    points = []
+    level = rng.uniform(0.3, 0.8)
+    for k in range(60):
+        level = min(0.98, max(0.02, level + rng.uniform(-0.08, 0.08)))
+        value = level if p != 2 else k / 59 * 0.9
+        x = left + k * (right - left) // 59
+        y = bottom - int(value * (bottom - top - 20))
+        points.append((x, y))
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        line(x0, y0, x1, y1, COLOURS[p % len(COLOURS)])
+
+
+def chunk(kind, data):
+    body = kind + data
+    return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+raw_rows = b"".join(b"\x00" + bytes(pixels[y * W * 3:(y + 1) * W * 3]) for y in range(H))
+png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+       + chunk(b"IDAT", zlib.compress(raw_rows, 9)) + chunk(b"IEND", b""))
+
+name = f"{job_id}_profile.png"
+sys.stderr.write(f"Writing {name}\n")
+with open(name, "wb") as f:
+    f.write(png)

@@ -1,0 +1,18 @@
+# General
+.DS_Store
+
+# bundle (as in Slurm Composer: misc/Gemfile is copied here to install gems)
+/Gemfile
+/Gemfile.lock
+/vendor/
+/.bundle
+
+# Local test files: NeSI's seff fetched by test/run_local.sh, and the seff
+# reports the app saves while running locally.
+test/.cache/
+__pycache__/
+*.pyc
+
+# Passenger's restart trigger
+tmp/*
+!tmp/.keep

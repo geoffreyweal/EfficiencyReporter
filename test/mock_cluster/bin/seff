@@ -1,0 +1,11 @@
+#!/bin/bash
+# Runs NeSI's real seff (nn_seff, from github.com/nesi/opt-nesi-bin) against
+# the mock sacct beside this file. test/run_local.sh fetches nn_seff into
+# test/.cache on first use; set ER_TEST_NN_SEFF to use another copy.
+here=$(cd "$(dirname "$0")" && pwd)
+nn_seff=${ER_TEST_NN_SEFF:-$here/../../.cache/nn_seff}
+if [ ! -f "$nn_seff" ]; then
+  echo "seff (test): $nn_seff not found. Run test/run_local.sh once to fetch it." >&2
+  exit 1
+fi
+exec python3 "$nn_seff" "$@"

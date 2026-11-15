@@ -1,0 +1,10 @@
+---
+name: Job Efficiency
+category: Jobs
+subcategory: Tools
+description: |
+  See how well your Slurm jobs from the last three months used the CPUs,
+  memory, time and GPUs they asked for, as reported by seff, with the
+  profile_plot of every job run with --profile task.
+icon: fa://chart-line
+new_window: false

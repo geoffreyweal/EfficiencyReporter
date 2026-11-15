@@ -1,0 +1,75 @@
+---
+# Efficiency Reporter: site settings for Mahuika.
+#
+# The app restarts with these after "Restart Web Server" in OnDemand's Help
+# menu (or touch tmp/restart.txt in the app directory).
+
+## Where the commands run
+# The OnDemand host on Mahuika is not a Slurm client, so, as in Slurm Composer,
+# sacct, seff and profile_plot run on a login node: ssh_wrapper is put in front
+# of each command. Leave ssh_wrapper empty ("") to run them on this host.
+# BatchMode stops ssh from ever waiting for a password that cannot be typed.
+login_node: "login.hpc.nesi.org.nz"
+ssh_wrapper: "ssh -o BatchMode=yes -o ConnectTimeout=20 login.hpc.nesi.org.nz"
+
+## SSH key check, exactly as in Slurm Composer.
+# When true, the app checks that the user has an SSH key that is actually
+# authorised (in ~/.ssh/authorized_keys). If none is, it generates a
+# passphrase-less key of its own, named "<ssh_key_name>_<ssh_key_type>"
+# (e.g. opencomposer_ed25519), authorises it, and adds an IdentityFile line to
+# ~/.ssh/config so that ssh offers it. Home directories are shared with the
+# login nodes, so that is all ssh needs. A key the user already owns is never
+# authorised on their behalf. With the same ssh_key_name as Slurm Composer, the
+# two apps share one key.
+ensure_ssh_key: true
+ssh_key_type:   "ed25519"
+ssh_key_name:   "opencomposer"
+
+## Where the app keeps the seff reports it has saved, one directory per user.
+data_dir: <%= ENV['HOME'] %>/ondemand/data/sys/efficiency_reporter
+
+## The commands, exactly as a user would type them on the login node.
+# The app shows what they print and never works out efficiency itself, so
+# whatever these commands report is what users see.
+commands:
+  sacct:        "sacct"
+  seff:         "seff"
+  profile_plot: "profile_plot"
+
+# Added to the end of PATH on the login node, in case the shell that ssh starts
+# there does not already include it.
+extra_path: "/opt/nesi/bin"
+
+## What to show
+# How many months of jobs to list.
+history_months: 3
+
+# How many jobs to give seff in one call. seff reads them all with one sacct
+# call, which it allows 30 seconds.
+seff_batch_size: 100
+
+# Search each finished job's batch script (sacct --batch-script) for --profile,
+# so the job list can mark the jobs that should have a profile_plot. Opening a
+# job always runs profile_plot for these, whatever this finds.
+detect_profiling: true
+
+# Seconds any one command may take before it is stopped.
+command_timeout: 120
+
+# Colours for CPU, memory and GPU use, in percent: at or above "good" is
+# green, at or above "warning" is amber, at or above "serious" is orange, and
+# anything lower is red.
+thresholds:
+  good:    70
+  warning: 40
+  serious: 20
+
+## Layout
+cluster_name:  "Mahuika"
+dashboard_url: "/pun/sys/dashboard"   # the "OnDemand" link at the top
+
+docs:
+  efficiency: "https://docs.nesi.org.nz/Software/Profiling_and_Debugging/Finding_Job_Efficiency/"
+  profiling:  "https://docs.nesi.org.nz/Software/Profiling_and_Debugging/Slurm_Native_Profiling/"
+  scaling:    "https://docs.nesi.org.nz/Software/Profiling_and_Debugging/Job_Scaling_Ascertaining_job_dimensions/"
+  gpus:       "https://docs.nesi.org.nz/Batch_Computing/Using_GPUs/"

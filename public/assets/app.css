@@ -1,0 +1,677 @@
+/* Efficiency Reporter: styles.
+ *
+ * Colours are set once here, as roles, for light and dark: the media query
+ * follows the operating system, and data-theme on <html> can force either.
+ * Status colours (good / warning / serious / critical) only ever mean how well
+ * a job used what it asked for, or how it ended, and always sit beside a
+ * number or a word, never on their own.
+ */
+
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-sunk: #f3f2ee;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-3: #6e6d68;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --accent: #2a78d6;
+  --accent-ink: #1c5cab;
+  --accent-wash: rgba(42, 120, 214, 0.08);
+  --track: #e9e8e2;
+  --neutral-fill: #2a78d6;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --muted-dot: #a3a29b;
+  --shadow: 0 1px 2px rgba(11, 11, 11, 0.05);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-sunk: #131312;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --ink-3: #a3a29b;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --accent: #3987e5;
+    --accent-ink: #86b6ef;
+    --accent-wash: rgba(57, 135, 229, 0.14);
+    --track: #2c2c2a;
+    --neutral-fill: #3987e5;
+    --muted-dot: #6e6d68;
+    --shadow: none;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-sunk: #131312;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --ink-3: #a3a29b;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --accent: #3987e5;
+  --accent-ink: #86b6ef;
+  --accent-wash: rgba(57, 135, 229, 0.14);
+  --track: #2c2c2a;
+  --neutral-fill: #3987e5;
+  --muted-dot: #6e6d68;
+  --shadow: none;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.45 var(--sans);
+}
+
+a { color: var(--accent-ink); }
+a:hover { text-decoration-thickness: 2px; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+code, pre, kbd { font-family: var(--mono); }
+
+/* ---- Top bar ---------------------------------------------------------- */
+
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar-inner {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-mark { width: 22px; height: 22px; color: var(--accent); flex: none; }
+.brand h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+
+.topbar-links { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+/* ---- Page ------------------------------------------------------------- */
+
+.page {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 20px 24px 48px;
+}
+
+.loading-line, .notice { color: var(--ink-2); }
+
+.intro {
+  margin: 0 0 16px;
+  color: var(--ink-2);
+  max-width: 900px;
+}
+.intro strong { color: var(--ink); font-weight: 600; }
+
+/* ---- Buttons and form controls ------------------------------------------ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--accent-wash); }
+.btn[disabled] { opacity: 0.55; cursor: default; }
+.btn svg { width: 15px; height: 15px; flex: none; }
+.btn-small { min-height: 26px; padding: 2px 9px; font-size: 12.5px; }
+.btn-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  min-height: 0;
+  color: var(--accent-ink);
+  text-decoration: underline;
+}
+.btn-link:hover { background: none; }
+
+select, input[type="search"] {
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+input[type="search"] { width: 240px; max-width: 100%; }
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.segmented button {
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 12px;
+  min-height: 30px;
+  cursor: pointer;
+}
+.segmented button:last-child { border-right: 0; }
+.segmented button:hover { background: var(--accent-wash); }
+.segmented button[aria-pressed="true"] {
+  background: var(--accent-wash);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-2);
+  cursor: pointer;
+  user-select: none;
+}
+.check input { margin: 0; accent-color: var(--accent); }
+
+/* ---- Filter row --------------------------------------------------------- */
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin-bottom: 14px;
+}
+.toolbar .spacer { flex: 1 1 auto; }
+.toolbar .count { color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* ---- seff progress -------------------------------------------------------- */
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.progress[hidden] { display: none; }
+.progress-bar {
+  flex: 1 1 200px;
+  max-width: 420px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+}
+.progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+.progress.is-error { border-color: var(--critical); }
+
+/* ---- Stat tiles ------------------------------------------------------------ */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px 12px;
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+.tile-label { font-size: 12.5px; color: var(--ink-2); margin: 0 0 4px; }
+.tile-value { font-size: 26px; font-weight: 600; line-height: 1.15; margin: 0; }
+.tile-value.is-empty { color: var(--ink-3); }
+.tile-sub { font-size: 12px; color: var(--ink-3); margin: 6px 0 0; }
+.tile .meter-track { width: 100%; height: 6px; margin-top: 8px; }
+
+/* ---- Job table ---------------------------------------------------------- */
+
+.table-card {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+/* position: relative keeps the screen-reader-only labels in the table (which
+   are absolutely positioned) inside the scrolling box, so a wide table never
+   widens the page. */
+.table-scroll { position: relative; overflow-x: auto; }
+
+table.jobs {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+table.jobs th, table.jobs td {
+  padding: 7px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--grid);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+table.jobs thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-weight: 600;
+  font-size: 12px;
+  border-bottom: 1px solid var(--axis);
+}
+table.jobs th.num, table.jobs td.num { text-align: right; }
+table.jobs td { font-variant-numeric: tabular-nums; }
+table.jobs th .sort {
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+table.jobs th .sort:hover { color: var(--ink); }
+table.jobs th .sort-mark { font-size: 10px; color: var(--ink-3); min-width: 8px; }
+table.jobs th[aria-sort] .sort { color: var(--ink); }
+
+tr.job { cursor: pointer; }
+tr.job:hover td { background: var(--accent-wash); }
+tr.job.is-open td { background: var(--accent-wash); border-bottom-color: transparent; }
+
+td.expander { width: 30px; padding-right: 0; }
+.expander button {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--ink-2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.expander button:hover { background: var(--accent-wash); color: var(--ink); }
+.expander svg { width: 14px; height: 14px; transition: transform 0.15s ease; }
+tr.job.is-open .expander svg { transform: rotate(90deg); }
+
+td.job-id { font-family: var(--mono); font-size: 12.5px; }
+td.job-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+td.dim { color: var(--ink-2); }
+
+/* State: a dot and the state's name. */
+.state { display: inline-flex; align-items: center; gap: 6px; }
+.state::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted-dot);
+  flex: none;
+}
+.state.tone-good::before { background: var(--good); }
+.state.tone-warning::before { background: var(--warning); }
+.state.tone-serious::before { background: var(--serious); }
+.state.tone-critical::before { background: var(--critical); }
+.state.tone-active::before { background: var(--accent); }
+.state.tone-pending::before { background: transparent; border: 1.5px solid var(--muted-dot); }
+
+/* Meter: a thin track with a fill whose colour says how good the number is. */
+.meter { display: inline-flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.meter-track {
+  position: relative;
+  width: 44px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+  flex: none;
+}
+.meter-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: var(--neutral-fill);
+}
+.tone-good .meter-fill, .meter-fill.tone-good { background: var(--good); }
+.tone-warning .meter-fill, .meter-fill.tone-warning { background: var(--warning); }
+.tone-serious .meter-fill, .meter-fill.tone-serious { background: var(--serious); }
+.tone-critical .meter-fill, .meter-fill.tone-critical { background: var(--critical); }
+.meter-value { min-width: 3.3em; text-align: right; color: var(--ink); }
+.meter-value.over { font-weight: 600; }
+
+.placeholder { color: var(--ink-3); }
+.waiting { color: var(--ink-3); letter-spacing: 1px; }
+.flag-error {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--critical);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+td.profile { width: 34px; text-align: center; }
+.profile-mark { width: 16px; height: 16px; color: var(--accent); vertical-align: middle; }
+
+.empty {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--ink-2);
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.pager .pages { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+
+/* ---- Opened job ----------------------------------------------------------- */
+
+tr.panel-row > td {
+  padding: 0;
+  white-space: normal;
+  background: var(--surface);
+  border-bottom: 1px solid var(--axis);
+}
+/* width: 0 with min-width: 100% fills the row without letting the opened
+   job's contents (a wide steps table, a long command) widen the job table:
+   wide parts scroll inside the panel instead. */
+.panel {
+  width: 0;
+  min-width: 100%;
+  padding: 16px 18px 20px 46px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  cursor: auto;
+}
+.panel > section, .panel > details { min-width: 0; }
+.panel h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.panel-head .cmd { margin-left: auto; flex: 0 1 auto; min-width: 0; }
+.cmd {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+.panel-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 18px;
+}
+pre.output {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow: auto;
+  max-height: 420px;
+  white-space: pre;
+  color: var(--ink);
+}
+pre.output.is-script { max-height: 520px; }
+.muted { color: var(--ink-3); }
+.small { font-size: 12.5px; }
+.error-text { color: var(--critical); }
+.panel .message {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  color: var(--ink-2);
+}
+.panel .message p { margin: 0 0 6px; }
+.panel .message p:last-child { margin-bottom: 0; }
+
+dl.facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+dl.facts dt { color: var(--ink-2); }
+dl.facts dd { margin: 0; overflow-wrap: anywhere; }
+dl.facts dd code { font-size: 12px; }
+
+ul.advice {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+ul.advice li {
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-sunk);
+  border-radius: 0 6px 6px 0;
+  color: var(--ink-2);
+}
+ul.advice li strong { color: var(--ink); }
+ul.advice li.tone-critical { border-left-color: var(--critical); }
+ul.advice li.tone-serious { border-left-color: var(--serious); }
+ul.advice li.tone-warning { border-left-color: var(--warning); }
+ul.advice code { font-size: 12px; }
+
+table.steps {
+  border-collapse: collapse;
+  font-size: 12.5px;
+  width: max-content;
+  min-width: 100%;
+}
+table.steps th, table.steps td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--grid);
+  text-align: left;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+table.steps th { color: var(--ink-2); font-weight: 600; border-bottom-color: var(--axis); }
+table.steps td.job-line { font-weight: 600; }
+
+.plot {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  display: inline-block;
+  max-width: 100%;
+}
+.plot img { display: block; max-width: 100%; height: auto; }
+.plot-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+
+details.script summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+}
+details.script[open] summary { margin-bottom: 8px; }
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--track);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- Errors, about ---------------------------------------------------------- */
+
+.error-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--critical);
+  border-radius: 8px;
+  padding: 16px 18px;
+  max-width: 900px;
+}
+.error-card h2 { font-size: 16px; margin: 0 0 8px; }
+.error-card p { margin: 0 0 10px; color: var(--ink-2); }
+
+.about {
+  margin-top: 22px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.about summary { cursor: pointer; }
+.about-body {
+  margin-top: 10px;
+  display: grid;
+  gap: 12px;
+  max-width: 900px;
+}
+.about-body p { margin: 0; }
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- Narrow screens ------------------------------------------------------------ */
+
+/* Narrower screens drop the less important columns, so the table scrolls
+   sideways (inside its card) as little as possible. */
+@media (max-width: 1360px) {
+  .col-asked { display: none; }
+}
+
+@media (max-width: 1200px) {
+  .col-elapsed, .col-when { display: none; }
+  td.job-name { max-width: 160px; }
+}
+
+@media (max-width: 1100px) {
+  .panel-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 980px) {
+  .col-time { display: none; }
+}
+
+@media (max-width: 860px) {
+  .page { padding: 16px 16px 40px; }
+  .topbar-inner { padding: 10px 16px; }
+  .panel { padding: 14px 12px 18px; }
+  input[type="search"] { width: 100%; }
+}
+
+@media (max-width: 620px) {
+  .col-name, .col-time, .col-gpu { display: none; }
+  table.jobs th, table.jobs td { padding: 7px 6px; }
+  table.jobs .meter-track { display: none; }
+  .tile-value { font-size: 22px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; }
+  .progress-bar span, .expander svg { transition: none; }
+}
