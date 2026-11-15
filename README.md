@@ -72,12 +72,8 @@ authorises it, and adds an `IdentityFile` line for it to `~/.ssh/config`. Home
 directories are shared with the login nodes, so that is all `ssh` needs. A key
 the user already owns is never authorised on their behalf.
 
-`seff`'s reports on finished jobs are saved in the user's OnDemand data
-directory (`~/ondemand/data/sys/<app>/seff_cache.jsonl`), so opening the app
-again only runs `seff` on new jobs. Each report is saved with a checksum of the
-`seff` program, and reports from a different `seff` are ignored, so a change to
-`seff` on the cluster shows up straight away. "About these numbers", at the
-bottom of the page, can also forget them.
+The app stores nothing. Every visit runs `sacct` and `seff` again, so the page
+always shows what they report now.
 
 ## Requirements
 
@@ -130,7 +126,6 @@ run through ERB first, so values can use `ENV`. Every setting has a default.
 | `login_node` | `login.hpc.nesi.org.nz` | The host the commands run on, as shown on the page. |
 | `ssh_wrapper` | `ssh -o BatchMode=yes -o ConnectTimeout=20 login.hpc.nesi.org.nz` | Put in front of every command, as in Slurm Composer. `""` runs them on the OnDemand host. BatchMode stops `ssh` from ever waiting for a password. |
 | `ensure_ssh_key`, `ssh_key_type`, `ssh_key_name` | `true`, `ed25519`, `opencomposer` | Slurm Composer's SSH key check (see above). With the same values as Slurm Composer, the two apps share one key. |
-| `data_dir` | `~/ondemand/data/sys/efficiency_reporter` | Where each user's saved `seff` reports are kept. |
 | `commands` | `sacct`, `seff`, `profile_plot` | The commands, exactly as a user would type them. |
 | `extra_path` | `/opt/nesi/bin` | Added to the end of `PATH` on the login node. |
 | `history_months` | `3` | How many months of jobs to show. |
@@ -189,7 +184,6 @@ lib/
   sacct.rb              reads sacct's output
   seff.rb               reads seff's output; runs seff in batches, with the fallback
   profiling.rb          finds --profile in batch scripts and submit lines
-  seff_cache.rb         the saved seff reports
 remote/                 the bash scripts run on the login node
 views/index.erb         the page
 public/assets/          the page's JavaScript, CSS and icon

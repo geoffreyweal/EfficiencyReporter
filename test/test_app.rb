@@ -20,7 +20,6 @@ require File.join(APP_DIR, "lib/ssh_key")
 require File.join(APP_DIR, "lib/profiling")
 require File.join(APP_DIR, "lib/sacct")
 require File.join(APP_DIR, "lib/seff")
-require File.join(APP_DIR, "lib/seff_cache")
 
 module EfficiencyReporter
   # seff's output today (from REANNZ's GPU workshop), as seff prints it.
@@ -218,13 +217,12 @@ module EfficiencyReporter
 
     def test_one_call_for_many_jobs
       fake = FakeRunner.new do |batch, _each, _scripts|
-        { "about" => { text: "seff_fingerprint=1-2", rc: 0 },
-          "seff" => { text: batch.split(",").map { |id| report(id) }.join("\n\n"), rc: 0 } }
+        { "seff" => { text: batch.split(",").map { |id| report(id) }.join("\n\n"), rc: 0 } }
       end
       outcome = Seff::Runner.new(fake, config).run(entries(1, 2, 3))
       assert_equal 1, fake.calls.length
       assert_equal %w[1 2 3], outcome.results.keys.sort
-      assert(outcome.results.values.all? { |r| r["error"].nil? && r["fp"] == "1-2" })
+      assert(outcome.results.values.all? { |r| r["error"].nil? && r["fetched_at"].is_a?(Integer) })
       assert outcome.batch_supported
     end
 
@@ -276,25 +274,6 @@ module EfficiencyReporter
     end
   end
 
-  class CacheTest < Minitest::Test
-    def test_round_trip_and_fingerprints
-      Dir.mktmpdir do |dir|
-        cache = SeffCache.new(dir)
-        cache.append([{ "id" => "1", "raw" => "1", "fp" => "a", "text" => "x" },
-                      { "id" => "2", "raw" => "2", "fp" => "b", "text" => "y" }])
-        cache.append([{ "id" => "1", "raw" => "1", "fp" => "a", "text" => "newer" }])
-        entries, lines = cache.load("a")
-        assert_equal 3, lines
-        assert_equal %w[1], entries.keys
-        assert_equal "newer", entries["1"]["text"]
-        cache.rewrite(entries.values)
-        assert_equal 1, cache.load("a")[1]
-        cache.clear
-        assert_equal [{}, 0], cache.load("a")
-      end
-    end
-  end
-
   # The SSH key set-up, which must behave as Slurm Composer's does.
   class SshKeyTest < Minitest::Test
     def setup
@@ -343,7 +322,6 @@ module EfficiencyReporter
       assert_equal "login.hpc.nesi.org.nz", conf.login_node
       assert conf.ensure_ssh_key?
       assert_equal "opencomposer", conf.ssh_key_name
-      assert_equal "#{Dir.home}/ondemand/data/sys/efficiency_reporter", conf.data_dir
       assert_equal "seff", conf.seff_command
       assert_equal 100, conf.seff_batch_size
     end
@@ -372,18 +350,14 @@ module EfficiencyReporter
       skip "NeSI's seff is not in test/.cache (run test/run_local.sh once)" unless File.exist?(NN_SEFF)
       require File.join(APP_DIR, "run")
       Sinatra::Application.set :run, false
-      @data = Dir.mktmpdir
-      @old_env = ENV.to_h.slice("PATH", "EFFICIENCY_REPORTER_CONF", "EFFICIENCY_REPORTER_DATA")
+      @old_env = ENV.to_h.slice("PATH", "EFFICIENCY_REPORTER_CONF")
       ENV["PATH"] = "#{MOCK_BIN}:#{ENV['PATH']}"
       ENV["EFFICIENCY_REPORTER_CONF"] = File.join(APP_DIR, "test/conf.local.yml.erb")
-      ENV["EFFICIENCY_REPORTER_DATA"] = @data
-      Conf::CACHE[:path] = nil # read the settings again, with this test's data_dir
       @app = Rack::MockRequest.new(Sinatra::Application)
     end
 
     def teardown
-      %w[PATH EFFICIENCY_REPORTER_CONF EFFICIENCY_REPORTER_DATA].each { |k| ENV[k] = @old_env[k] } if @old_env
-      FileUtils.rm_rf(@data) if @data
+      %w[PATH EFFICIENCY_REPORTER_CONF].each { |k| ENV[k] = @old_env[k] } if @old_env
     end
 
     def get_json(path)
@@ -409,7 +383,7 @@ module EfficiencyReporter
       assert_includes response.body, '"historyMonths":3'
     end
 
-    def test_jobs_seff_and_the_cache
+    def test_jobs_and_seff
       list = jobs
       assert_operator list.length, :>, 150
       byname = list.group_by { |j| j["name"] }
@@ -433,10 +407,8 @@ module EfficiencyReporter
       assert_equal "task", good["profile"]
       assert_equal %w[cpu mem time], good["metrics"].map { |m| m["kind"] }.uniq.sort
 
-      # The clean reports come back with the job list next time.
-      again = jobs.select { |j| j["seff"] }
-      assert_operator again.length, :>=, 50
-      refute(again.any? { |j| j["name"] == "node_glitch" }, "a failed report is not saved")
+      # Nothing is stored: the next visit gets no reports with the job list.
+      refute(jobs.any? { |j| j.key?("seff") })
     end
 
     def test_one_job

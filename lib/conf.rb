@@ -21,7 +21,6 @@ module EfficiencyReporter
       "ensure_ssh_key" => false,
       "ssh_key_type" => "ed25519",
       "ssh_key_name" => "opencomposer",
-      "data_dir" => nil,
       # The commands, as a user would type them.
       "commands" => { "sacct" => "sacct", "seff" => "seff", "profile_plot" => "profile_plot" },
       "extra_path" => "",
@@ -107,11 +106,6 @@ module EfficiencyReporter
 
     def ssh_key_name
       @values["ssh_key_name"].to_s
-    end
-
-    def data_dir
-      given = @values["data_dir"].to_s.strip
-      given.empty? ? File.join(Dir.home, "ondemand", "data", "sys", File.basename(APP_ROOT)) : given
     end
 
     def command(name)

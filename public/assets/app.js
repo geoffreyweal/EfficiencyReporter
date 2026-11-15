@@ -1030,7 +1030,7 @@
       const problem = el('div', { class: 'message' },
         el('p', { class: 'error-text' }, err.message), err.detail ? el('pre', { class: 'output' }, err.detail) : null);
       if (job.seff) {
-        // Keep the saved report, and say that it could not be checked.
+        // Keep the report from earlier, and say that it could not be checked.
         if (job.seff.fresh) showSeff(job, p, job.seff, false);
         else showSeff(job, p, Object.assign({}, job.seff, { fresh: true }), false);
         p.seffBody.prepend(problem);
@@ -1053,7 +1053,8 @@
     return promise;
   }
 
-  function showSeff(job, p, seff, saved) {
+  // earlier: the report came from the background run, and is being re-run now.
+  function showSeff(job, p, seff, earlier) {
     if (!seff) {
       if (ACTIVE.has(job.state) || !(job.cpus > 0)) {
         p.seffBody.replaceChildren(spinnerLine('Running seff…'));
@@ -1073,7 +1074,7 @@
       parts.push(el('details', { class: 'small' }, el('summary', null, 'What seff printed on stderr'),
         el('pre', { class: 'output' }, seff.stderr)));
     }
-    if (seff.fetched_at && saved && !seff.fresh) {
+    if (seff.fetched_at && earlier && !seff.fresh) {
       parts.push(el('p', { class: 'muted small' },
         `seff’s report from ${new Date(seff.fetched_at * 1000).toLocaleString('en-NZ')}; running seff again now…`));
     }
@@ -1303,21 +1304,9 @@
       ['Commands run on', a.host ? `${a.host}${a.login_node ? ` (via ${a.login_node})` : ''}` : a.login_node],
       ['SSH key', SSH_KEY[a.ssh_key] === undefined ? a.ssh_key : SSH_KEY[a.ssh_key]],
       ['sacct', a.sacct], ['seff', a.seff], ['profile_plot', a.profile_plot], ['Slurm', a.slurm],
-      ['seff fingerprint', a.seff_fingerprint], ['Jobs listed in', a.seconds ? `${a.seconds} s` : ''],
-      ['Saved seff reports', a.data_dir]
+      ['Jobs listed in', a.seconds ? `${a.seconds} s` : '']
     ].filter(([, value]) => value);
     const missing = ['seff', 'profile_plot'].filter((tool) => a.user && !a[tool]);
-
-    const forget = el('button', { class: 'btn btn-small', type: 'button' }, 'Forget saved seff reports');
-    forget.addEventListener('click', async () => {
-      forget.disabled = true;
-      try {
-        await api('api/cache', { method: 'POST', body: {} });
-        forget.textContent = 'Forgotten: refresh to run seff again';
-      } catch (err) {
-        forget.textContent = `Could not forget them: ${err.message}`;
-      }
-    });
 
     append(shell.about, [
       el('summary', null, 'About these numbers'),
@@ -1325,14 +1314,12 @@
         el('p', null, 'Each job’s efficiency is exactly what ', code(CMD.seff), ' reports for it, run as you on the cluster. ',
           'Opening a job runs seff again and shows its report as printed, along with sacct’s view of the job and its steps, ',
           'its batch script and, for jobs run with ', code('--profile task'), ', the chart from ', code(CMD.profilePlot), '.'),
-        el('p', null, 'seff’s reports on finished jobs are saved, so they are not fetched again next time. ',
-          'They are dropped automatically whenever seff itself changes.'),
+        el('p', null, 'Nothing is stored: every visit to this page runs sacct and seff again.'),
         el('p', null, 'Read more: ', link(DOCS.efficiency, 'Finding Job Efficiency'), ' · ',
           link(DOCS.profiling, 'Slurm Native Profiling'), ' · ', link(DOCS.scaling, 'Job Scaling')),
         missing.length ? el('p', { class: 'error-text' }, `Not found on the cluster: ${missing.join(', ')}.`) : null,
         facts.length ? el('dl', { class: 'facts' }, facts.flatMap(([k, v]) => [el('dt', null, k), el('dd', null, code(String(v)))])) : null,
-        Array.isArray(a.warnings) && a.warnings.length ? el('pre', { class: 'output' }, a.warnings.join('\n')) : null,
-        el('p', null, forget))
+        Array.isArray(a.warnings) && a.warnings.length ? el('pre', { class: 'output' }, a.warnings.join('\n')) : null)
     ]);
   }
 

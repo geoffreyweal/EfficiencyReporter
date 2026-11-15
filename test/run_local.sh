@@ -28,7 +28,6 @@ fi
 
 export PATH="$here/mock_cluster/bin:$PATH"
 export EFFICIENCY_REPORTER_CONF="$here/conf.local.yml.erb"
-export EFFICIENCY_REPORTER_DATA="$cache/data"
 export RACK_ENV="${RACK_ENV:-development}"
 
 echo "Efficiency Reporter on http://localhost:$port/ (Ctrl-C to stop)"

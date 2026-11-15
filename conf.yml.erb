@@ -25,9 +25,6 @@ ensure_ssh_key: true
 ssh_key_type:   "ed25519"
 ssh_key_name:   "opencomposer"
 
-## Where the app keeps the seff reports it has saved, one directory per user.
-data_dir: <%= ENV['HOME'] %>/ondemand/data/sys/efficiency_reporter
-
 ## The commands, exactly as a user would type them on the login node.
 # The app shows what they print and never works out efficiency itself, so
 # whatever these commands report is what users see.

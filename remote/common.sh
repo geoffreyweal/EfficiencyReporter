@@ -82,20 +82,3 @@ er_sacct_fields() {
   done
   printf '%s' "${out#,}"
 }
-
-# er_fingerprint COMMAND
-# Prints a checksum of the file that COMMAND runs. The app keeps the seff
-# results it has saved only while this stays the same, so that a change to seff
-# on the cluster shows up straight away.
-er_fingerprint() {
-  local path
-  path=$(command -v "$1" 2>/dev/null) || return 0
-  case $path in
-    /*) ;;
-    *) return 0 ;;
-  esac
-  path=$(readlink -f "$path" 2>/dev/null || printf '%s' "$path")
-  if [ -f "$path" ]; then
-    cksum <"$path" 2>/dev/null | awk '{print $1 "-" $2}'
-  fi
-}

@@ -85,7 +85,6 @@ t0=$SECONDS
 out=$(run_remote seff "$batch" "" "$batch")
 echo
 echo "== seff.sh: one seff call for $batch   ($((SECONDS - t0)) s)"
-section about <<<"$out" | indent
 echo "    seff exit status $(rc seff <<<"$out"):"
 section seff <<<"$out" | head -60 | indent
 section seff.stderr <<<"$out" | tail -5 | indent

@@ -10,7 +10,6 @@
 # Any of them may be empty.
 #
 # Sections:
-#   about        seff's fingerprint
 #   seff         output of the single seff call
 #   seff:<id>    output of seff for job <id>, for each of EACH_IDS
 #   scripts      the "Batch Script for <id>" headers and --profile lines of
@@ -19,10 +18,6 @@
 er_main() {
   local batch_ids=$1 each_ids=$2 script_ids=$3 id
   local -a ids
-
-  er_begin about
-  printf 'seff_fingerprint=%s\n' "$(er_fingerprint "${ER_SEFF[0]}")"
-  er_end about 0
 
   if [ -n "$batch_ids" ]; then
     IFS=, read -r -a ids <<<"$batch_ids"

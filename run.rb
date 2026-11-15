@@ -11,12 +11,12 @@
 # user), so the commands see exactly what the user would see in a terminal.
 #
 #   GET  /               the page (views/index.erb, public/assets/app.js)
-#   GET  /api/jobs       the user's jobs over the last history_months (sacct),
-#                        with any seff reports already saved
+#   GET  /api/jobs       the user's jobs over the last history_months (sacct)
 #   POST /api/seff       seff reports for a batch of finished jobs
 #   GET  /api/job        sacct, seff and the batch script for one job
 #   GET  /api/profile    profile_plot's image for one job
-#   POST /api/cache      forget the saved seff reports
+#
+# The app stores nothing: every visit runs sacct and seff again.
 
 require "sinatra"
 require "sinatra/reloader" if ENV.fetch("RACK_ENV", "production") == "development"
@@ -31,7 +31,6 @@ require_relative "lib/ssh_key"
 require_relative "lib/profiling"
 require_relative "lib/sacct"
 require_relative "lib/seff"
-require_relative "lib/seff_cache"
 
 set :environment, ENV.fetch("RACK_ENV", "production").to_sym
 set :host_authorization, { permitted_hosts: [] } if ENV.fetch("RACK_ENV", "production") == "development"
@@ -51,9 +50,6 @@ module EfficiencyReporter
   JOB_ID = /\A\d+(?:_\d+)?(?:\+\d+)?\z/.freeze
   RAW_ID = /\A\d+\z/.freeze
   MAX_JOBS_PER_SEFF_REQUEST = 500
-  # A seff report is saved only once the job has been over for this long, so
-  # the last of its accounting has reached the database.
-  SETTLE_SECONDS = 600
 end
 
 helpers do
@@ -66,10 +62,6 @@ helpers do
   def runner
     @ssh_key = EfficiencyReporter::SshKey.ensure_access(conf)
     EfficiencyReporter::CommandRunner.new(conf)
-  end
-
-  def cache
-    EfficiencyReporter::SeffCache.new(conf.data_dir)
   end
 
   def json_reply(value, code = 200)
@@ -118,37 +110,6 @@ helpers do
     end
   end
 
-  # Puts saved seff reports on the jobs they belong to, and tidies the cache.
-  def attach_saved_reports(jobs, fingerprint)
-    saved, lines = cache.load(fingerprint)
-    live = []
-    jobs.each do |job|
-      entry = saved[job["id"]]
-      next unless entry && entry["raw"].to_s == job["raw"].to_s
-
-      job["seff"] = EfficiencyReporter::Seff.present(entry)
-      live << entry
-    end
-    cache.rewrite(live) if lines > (live.length * 3 / 2) + 100
-  rescue SystemCallError => e
-    warn "[Efficiency Reporter] could not read saved seff reports: #{e.message}"
-  end
-
-  # Saves the reports that will not change: seff ran cleanly, it found the
-  # numbers, and the job finished a while ago.
-  def save_reports(reports, entries)
-    ends = entries.to_h { |e| [e["id"], e["end"]] }
-    settled_before = Time.now - EfficiencyReporter::SETTLE_SECONDS
-    keep = reports.select do |r|
-      finished = ends[r["id"]] && (Time.strptime(ends[r["id"]], "%Y-%m-%dT%H:%M:%S") rescue nil)
-      r["rc"].to_i.zero? && r["error"].nil? && !r["fp"].to_s.empty? &&
-        !EfficiencyReporter::Seff.parse(r["text"])["metrics"].empty? && finished && finished < settled_before
-    end
-    cache.append(keep)
-  rescue SystemCallError => e
-    warn "[Efficiency Reporter] could not save seff reports: #{e.message}"
-  end
-
   # A job as the browser sends it to /api/seff, checked.
   def seff_entry(job)
     return nil unless job.is_a?(Hash)
@@ -167,12 +128,12 @@ helpers do
     }
   end
 
-  def seff_report(result, id, raw, fingerprint)
+  def seff_report(result, id, raw)
     text = result.text("seff")
     rc = result.rc("seff")
     stderr = result.text("seff.stderr").to_s
     report = { "id" => id, "raw" => raw, "text" => text.to_s.strip, "rc" => rc,
-               "error" => nil, "stderr" => nil, "fetched_at" => Time.now.to_i, "fp" => fingerprint }
+               "error" => nil, "stderr" => nil, "fetched_at" => Time.now.to_i }
     if text.nil?
       report["error"] = "seff did not finish (the command was stopped)."
     elsif !rc&.zero?
@@ -238,7 +199,6 @@ get "/api/jobs" do
   end
 
   jobs = EfficiencyReporter::Sacct.parse_jobs(result.text("jobs"))
-  attach_saved_reports(jobs, about["seff_fingerprint"].to_s)
 
   json_reply({
     "jobs" => jobs,
@@ -247,7 +207,6 @@ get "/api/jobs" do
       "ssh_key" => @ssh_key.to_s,
       "command" => result.command,
       "seconds" => result.seconds,
-      "data_dir" => conf.data_dir,
       "warnings" => Array(result.text("jobs.stderr")).reject { |w| w.strip.empty? }
     ),
     "range" => { "start" => sacct_time(start), "end" => sacct_time(finish) }
@@ -264,7 +223,6 @@ post "/api/seff" do
   outcome = EfficiencyReporter::Seff::Runner.new(runner, conf).run(entries, each_only: body["mode"] == "each")
   return json_reply({ "error" => "Could not run seff.", "detail" => outcome.transport_error }, 502) if outcome.transport_error
 
-  save_reports(outcome.results.values, entries)
   json_reply({
     "results" => outcome.results.transform_values { |r| EfficiencyReporter::Seff.present(r) },
     "batch_supported" => outcome.batch_supported,
@@ -290,10 +248,8 @@ get "/api/job" do
   profile = script["text"].each_line.filter_map { |line| EfficiencyReporter::Profiling.from_script_line(line) }.join(",")
   profile = EfficiencyReporter::Profiling.from_submit_line(job_row["SubmitLine"]) if profile.empty?
 
-  fingerprint = EfficiencyReporter::Seff.key_values(result.text("about"))["seff_fingerprint"].to_s
-  report = seff_report(result, id, raw, fingerprint)
+  report = seff_report(result, id, raw)
   report["profile"] = profile
-  save_reports([report], [{ "id" => id, "end" => EfficiencyReporter::Sacct.time(job_row["End"]) }])
 
   steps_error = result.rc("steps")&.zero? ? nil : result.text("steps.stderr").to_s.strip
   json_reply({
@@ -331,13 +287,6 @@ get "/api/profile" do
     headers "content-security-policy" => "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
   end
   bytes
-end
-
-post "/api/cache" do
-  return json_reply({ "error" => "Send JSON." }, 415) unless request.media_type == "application/json"
-
-  cache.clear
-  json_reply({ "ok" => true })
 end
 
 # Sinatra runs this for every 404, including /api/profile's own answer when

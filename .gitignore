@@ -7,8 +7,7 @@
 /vendor/
 /.bundle
 
-# Local test files: NeSI's seff fetched by test/run_local.sh, and the seff
-# reports the app saves while running locally.
+# NeSI's seff, fetched by test/run_local.sh for local testing.
 test/.cache/
 __pycache__/
 *.pyc
