@@ -16,9 +16,9 @@ stand-in. On Mahuika it is the chart `profile_plot` makes.)*
 ## What it shows
 
 - **A short report for every job**: state, when it finished, how long it ran,
-  what it asked for, and `seff`'s figures for time limit used, CPU, memory and
-  GPU use, each as a number with a small meter (green, amber, orange or red for
-  CPU, memory and GPU). Sort by any column; filter by date range, state, name or
+  what it asked for, and `seff`'s figures for time limit used, CPU, memory, GPU
+  and GPU memory use, each as a number with a small meter (green, amber, orange
+  or red for CPU, memory, GPU and GPU memory). Sort by any column; filter by date range, state, name or
   ID, profiled jobs only, or jobs that need attention.
 - **A summary** of the jobs shown: the median of each figure, and the share of
   all reserved core time the jobs used.
@@ -43,7 +43,11 @@ itself: the list only picks the percentages out of `seff`'s own lines, matched
 loosely so that a change to `seff`'s wording does not break it.
 
 1. **`sacct`** lists the user's jobs over the last `history_months`
-   (`remote/list_jobs.sh`).
+   (`remote/list_jobs.sh`), in three steps that start at once: the last 7
+   days, the last 30 days and the whole history. Each step's jobs are shown as
+   soon as `sacct` returns them, so recent jobs can be looked at (and `seff`
+   starts on them) while older ones are still being listed; a range still being
+   listed shows a small spinner.
 2. **`seff`** is run in the background on the finished jobs it has no saved
    report for, one call at a time, starting with the most recent jobs and
    working back: 20 jobs in the first call, so the newest figures appear
@@ -77,15 +81,19 @@ authorises it, and adds an `IdentityFile` line for it to `~/.ssh/config`. Home
 directories are shared with the login nodes, so that is all `ssh` needs. A key
 the user already owns is never authorised on their behalf.
 
-`seff`'s reports on finished jobs are saved in an SQLite database in the
-user's `data_dir` (`seff_reports.db`), as Slurm Composer keeps its job history,
-so opening the app again only runs `seff` on jobs it has not reported on yet.
-Only clean reports on jobs that finished more than 10 minutes ago are saved, so
-that the last of their accounting has reached Slurm's database. Each report is
-saved with a checksum of the `seff` program, and reports from a different
-`seff` are dropped, so a change to `seff` on the cluster shows up straight
-away. Opening a job always runs `seff` on it again, and "About these numbers",
-at the bottom of the page, can forget all the saved reports.
+`seff`'s reports and `profile_plot`'s plots for finished jobs are saved in an
+SQLite database in the user's `data_dir` (`efficiency_reporter.db`, tables
+`seff_reports` and `profile_plots`), as Slurm Composer keeps its job history.
+Opening the app again only runs `seff` on jobs it has not reported on yet, and
+a saved plot opens without running `profile_plot` again. Only clean results for
+jobs that finished more than 10 minutes ago are saved, so that the last of
+their accounting has reached Slurm's database. Each row is saved with a
+checksum of the program that made it, and rows from a different `seff` or
+`profile_plot` are dropped, so a change to either on the cluster shows up
+straight away. Opening a job always runs `seff` on it again; a saved plot has a
+"Run profile_plot again" button; and "About these numbers", at the bottom of
+the page, can forget everything saved. Each batch is saved in one transaction,
+so an interrupted save leaves the database as it was.
 
 ## Requirements
 
@@ -139,7 +147,7 @@ run through ERB first, so values can use `ENV`. Every setting has a default.
 | `login_node` | `login.hpc.nesi.org.nz` | The host the commands run on, as shown on the page. |
 | `ssh_wrapper` | `ssh -o BatchMode=yes -o ConnectTimeout=20 login.hpc.nesi.org.nz` | Put in front of every command, as in Slurm Composer. `""` runs them on the OnDemand host. BatchMode stops `ssh` from ever waiting for a password. |
 | `ensure_ssh_key`, `ssh_key_type`, `ssh_key_name` | `true`, `ed25519`, `opencomposer` | Slurm Composer's SSH key check (see above). With the same values as Slurm Composer, the two apps share one key. |
-| `data_dir` | `~/ondemand/data/sys/efficiency_reporter` | Where each user's saved `seff` reports are kept (`seff_reports.db`). |
+| `data_dir` | `~/ondemand/data/sys/efficiency_reporter` | Where each user's saved `seff` reports and profile plots are kept (`efficiency_reporter.db`). |
 | `commands` | `sacct`, `seff`, `profile_plot` | The commands, exactly as a user would type them. |
 | `extra_path` | `/opt/nesi/bin` | Added to the end of `PATH` on the login node. |
 | `history_months` | `3` | How many months of jobs to show. |
@@ -198,7 +206,7 @@ lib/
   sacct.rb              reads sacct's output
   seff.rb               reads seff's output; runs seff in batches, with the fallback
   profiling.rb          finds --profile in batch scripts and submit lines
-  seff_store.rb         the saved seff reports (SQLite)
+  report_store.rb       the saved seff reports and profile plots (SQLite)
 remote/                 the bash scripts run on the login node
 views/index.erb         the page
 public/assets/          the page's JavaScript, CSS and icon

@@ -20,7 +20,7 @@ require File.join(APP_DIR, "lib/ssh_key")
 require File.join(APP_DIR, "lib/profiling")
 require File.join(APP_DIR, "lib/sacct")
 require File.join(APP_DIR, "lib/seff")
-require File.join(APP_DIR, "lib/seff_store")
+require File.join(APP_DIR, "lib/report_store")
 
 module EfficiencyReporter
   # seff's output today (from REANNZ's GPU workshop), as seff prints it.
@@ -276,11 +276,11 @@ module EfficiencyReporter
     end
   end
 
-  class SeffStoreTest < Minitest::Test
+  class ReportStoreTest < Minitest::Test
     def setup
-      skip "the sqlite3 gem is not installed" unless SeffStore.available?
+      skip "the sqlite3 gem is not installed" unless ReportStore.available?
       @dir = Dir.mktmpdir
-      @store = SeffStore.new(File.join(@dir, "data"))
+      @store = ReportStore.new(File.join(@dir, "data"))
     end
 
     def teardown
@@ -291,25 +291,54 @@ module EfficiencyReporter
       { "id" => id, "raw" => id, "text" => text, "profile" => nil, "fp" => version, "fetched_at" => 1_700_000_000 }
     end
 
-    def test_saves_and_loads_by_seff_version
-      assert_equal({}, @store.load("v1"))
-      @store.save([report("1", "v1"), report("2", "v1"), report("3", "v2")])
-      @store.save([report("1", "v1", "Job ID: 1 again")])
-      saved = @store.load("v1")
+    def plot(raw, version, image = "\x89PNG\r\n\x1a\n#{raw}".b)
+      { raw_id: raw, job_id: raw, image: image, type: "image/png", messages: "drawn remotely", version: version }
+    end
+
+    def test_seff_reports_by_seff_version
+      assert_equal({}, @store.load_seff("v1"))
+      @store.save_seff([report("1", "v1"), report("2", "v1"), report("3", "v2")])
+      @store.save_seff([report("1", "v1", "Job ID: 1 again")])
+      saved = @store.load_seff("v1")
       assert_equal %w[1 2], saved.keys.sort
       assert_equal "Job ID: 1 again", saved["1"]["text"]
       assert_equal 1_700_000_000, saved["1"]["fetched_at"]
-      assert_equal %w[3], @store.load("v2").keys
-      assert_equal 3, @store.count
+      assert_equal %w[3], @store.load_seff("v2").keys
+    end
+
+    def test_profile_plots_keep_their_bytes
+      assert_nil @store.load_plot("7")
+      png = (0..255).map(&:chr).join.b * 100
+      @store.save_plot(**plot("7", "p1", png))
+      saved = @store.load_plot("7")
+      assert_equal png, saved["image"]
+      assert_equal Encoding::BINARY, saved["image"].encoding
+      assert_equal "image/png", saved["type"]
+      assert_equal "drawn remotely", saved["messages"]
+      assert_kind_of Integer, saved["saved_at"]
     end
 
     def test_prune_and_clear
-      @store.save([report("1", "v1"), report("2", "v1"), report("3", "v2")])
-      @store.prune(%w[1 3], "v1")
-      assert_equal %w[1], @store.load("v1").keys, "job 2 is no longer listed; job 3 is from another seff"
-      assert_equal 1, @store.count
+      @store.save_seff([report("1", "v1"), report("2", "v1"), report("3", "v2")])
+      @store.save_plot(**plot("1", "p1"))
+      @store.save_plot(**plot("2", "p1"))
+      @store.save_plot(**plot("3", "p0"))
+      @store.prune(job_ids: %w[1 3], raw_ids: %w[1 3], seff_version: "v1", plot_version: "p1")
+      assert_equal %w[1], @store.load_seff("v1").keys, "job 2 is no longer listed; job 3 is from another seff"
+      assert_equal({ "seff_reports" => 1, "profile_plots" => 1 }, @store.counts)
+      refute_nil @store.load_plot("1")
       @store.clear
-      assert_equal 0, @store.count
+      assert_equal({ "seff_reports" => 0, "profile_plots" => 0 }, @store.counts)
+    end
+
+    def test_keeps_the_database_of_earlier_versions
+      dir = File.join(@dir, "data")
+      FileUtils.mkdir_p(dir)
+      old = ReportStore.new(dir)
+      old.save_seff([report("9", "v1")])
+      File.rename(old.path, File.join(dir, ReportStore::OLD_FILE))
+      assert_equal %w[9], ReportStore.new(dir).load_seff("v1").keys
+      refute File.exist?(File.join(dir, ReportStore::OLD_FILE))
     end
   end
 
@@ -361,6 +390,7 @@ module EfficiencyReporter
       assert_equal "login.hpc.nesi.org.nz", conf.login_node
       assert conf.ensure_ssh_key?
       assert_equal "opencomposer", conf.ssh_key_name
+      assert_equal "#{Dir.home}/ondemand/data/sys/efficiency_reporter", conf.data_dir
       assert_equal "seff", conf.seff_command
       assert_equal 100, conf.seff_batch_size
     end
@@ -452,8 +482,11 @@ module EfficiencyReporter
 
       # The clean reports come back with the job list next time, from the
       # SQLite database, so seff does not have to run on them again.
-      skip "the sqlite3 gem is not installed" unless SeffStore.available?
-      assert File.exist?(File.join(@data, SeffStore::FILE))
+      skip "the sqlite3 gem is not installed" unless ReportStore.available?
+      assert File.exist?(File.join(@data, ReportStore::FILE))
+
+      # A list of only the recent jobs does not drop the reports on older ones.
+      assert_equal 200, get_json("/api/jobs?days=7")[0]
       again = jobs.select { |j| j["seff"] }
       assert_operator again.length, :>=, 50
       refute(again.any? { |j| j["name"] == "node_glitch" }, "a failed report is not saved")
@@ -463,6 +496,14 @@ module EfficiencyReporter
       response = @app.delete("/api/reports")
       assert_equal 200, response.status
       refute(jobs.any? { |j| j.key?("seff") })
+    end
+
+    def test_recent_jobs_only
+      status, week = get_json("/api/jobs?days=7")
+      assert_equal 200, status, week.inspect
+      refute week["listed"]["complete"]
+      assert_operator week["range"]["start"], :<, week["listed"]["start"]
+      assert_operator week["jobs"].length, :<, jobs.length
     end
 
     def test_one_job
@@ -480,16 +521,33 @@ module EfficiencyReporter
     def test_profile_plot
       list = jobs
       profiled = list.find { |j| j["name"] == "profile_me" }
-      response = @app.get("/api/profile?raw=#{profiled['raw']}")
+      query = "raw=#{profiled['raw']}&id=#{profiled['id']}&end=#{profiled['end']}"
+      response = @app.get("/api/profile?#{query}")
       assert_equal 200, response.status
       assert_equal "image/png", response.headers["content-type"]
       assert response.body.b.start_with?("\x89PNG".b)
       assert_includes response.headers["x-profile-plot-messages"], "rendering remotely"
+      assert_nil response.headers["x-profile-plot-saved"], "this one was drawn just now"
 
       plain = list.find { |j| j["name"] == "postprocess" }
       status, data = get_json("/api/profile?raw=#{plain['raw']}")
       assert_equal 404, status
       assert_includes data["detail"], "No profile data"
+
+      skip "the sqlite3 gem is not installed" unless ReportStore.available?
+      # Next time the plot comes from the database, byte for byte.
+      again = @app.get("/api/profile?#{query}")
+      assert_equal 200, again.status
+      refute_nil again.headers["x-profile-plot-saved"]
+      assert_equal response.body.b, again.body.b
+      assert_includes again.headers["x-profile-plot-messages"], "rendering remotely"
+      # Unless asked to run profile_plot again.
+      assert_nil @app.get("/api/profile?#{query}&fresh=1").headers["x-profile-plot-saved"]
+
+      # A running job's plot is not saved: it is still changing.
+      running = list.find { |j| j["name"] == "still_running" }
+      @app.get("/api/profile?raw=#{running['raw']}&id=#{running['id']}&end=")
+      assert_nil @app.get("/api/profile?raw=#{running['raw']}&id=#{running['id']}&end=").headers["x-profile-plot-saved"]
     end
 
     def test_bad_input

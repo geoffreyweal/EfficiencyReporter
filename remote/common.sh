@@ -106,8 +106,9 @@ er_sacct_fields() {
 
 # er_fingerprint COMMAND
 # Prints a checksum of the file that COMMAND runs. The app keeps the seff
-# reports it has saved only while this stays the same, so that a change to
-# seff on the cluster shows up straight away.
+# reports and profile plots it has saved only while the checksum of the
+# program that made them stays the same, so that a change to seff or
+# profile_plot on the cluster shows up straight away.
 er_fingerprint() {
   local path
   path=$(command -v "$1" 2>/dev/null) || return 0

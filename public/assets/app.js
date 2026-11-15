@@ -58,7 +58,7 @@
     cpu: { title: 'CPU efficiency', judged: true },
     mem: { title: 'Memory efficiency', judged: true },
     gpu: { title: 'GPU utilisation', judged: true },
-    gpu_mem: { title: 'GPU memory', judged: false }
+    gpu_mem: { title: 'GPU memory use', judged: true }
   };
 
   const ATTENTION_STATES = new Set(['FAILED', 'OUT_OF_MEMORY', 'TIMEOUT', 'NODE_FAIL', 'BOOT_FAIL', 'DEADLINE']);
@@ -80,7 +80,10 @@
     panels: new Map(),
     details: new Map(),
     profiles: new Map(),
-    queue: { todo: [], inflight: 0, sent: 0, paused: false, error: null, mode: 'batch', batchSize: CONFIG.batchSize || 100 }
+    queue: { todo: [], inflight: 0, sent: 0, paused: false, error: null, mode: 'batch', batchSize: CONFIG.batchSize || 100 },
+    listing: new Set(),
+    listed: new Set(),
+    listErrors: []
   };
 
   let shell = null;
@@ -310,32 +313,92 @@
 
   function needsAttention(job) {
     if (ATTENTION_STATES.has(job.state)) return true;
-    return ['cpu', 'mem', 'gpu'].some((kind) => job.m[kind] && job.m[kind].percent < T.warning);
+    return ['cpu', 'mem', 'gpu', 'gpu_mem'].some((kind) => job.m[kind] && job.m[kind].percent < T.warning);
   }
 
-  async function loadJobs() {
+  // The job list is fetched in steps that all start at once: the last 7
+  // days, the last 30 days and the whole history (0). Each step's jobs are
+  // shown as soon as sacct returns them, so recent jobs can be looked at, and
+  // seff can start on them, while older ones are still being listed.
+  const LIST_STEPS = [7, 30, 0].filter((days) => days === 0 || days < (CONFIG.historyMonths || 3) * 28);
+
+  function loadJobs() {
+    const token = (S.loadToken || 0) + 1;
+    S.loadToken = token;
     S.status = 'loading';
     S.error = null;
+    S.listing = new Set(LIST_STEPS);
+    S.listed = new Set();
+    S.listErrors = [];
     renderAll();
+    for (const days of LIST_STEPS) listStep(days, token);
+  }
+
+  async function listStep(days, token) {
+    let data = null;
+    let error = null;
     try {
-      const data = await api('api/jobs');
+      data = await api(days ? `api/jobs?days=${days}` : 'api/jobs');
+    } catch (err) {
+      error = err;
+    }
+    if (token !== S.loadToken) return; // Refresh was pressed meanwhile
+    S.listing.delete(days);
+    if (data) {
+      S.listed.add(days);
+      mergeJobs(data);
+      return;
+    }
+    S.listErrors.push({ days, error });
+    if (S.status === 'ready') {
+      renderData();
+    } else if (!S.listing.size) {
+      // Every step failed, so there is nothing to show.
+      S.status = 'error';
+      S.error = error;
+      renderAll();
+    }
+  }
+
+  // Adds the jobs a listing step returned that are not in the list yet, and
+  // queues the finished ones that have no seff report.
+  function mergeJobs(data) {
+    const first = S.status !== 'ready';
+    if (first) {
       resetJobState();
-      S.about = data.about || {};
-      S.range = data.range || null;
-      S.jobs = (data.jobs || []).map(prepareJob);
-      S.byId = new Map(S.jobs.map((job) => [job.id, job]));
-      S.hasGpu = S.jobs.some((job) => (job.gpus && job.gpus.length) || job.m.gpu);
+      S.jobs = [];
+      S.byId = new Map();
+      S.queue.sent = 0;
       S.status = 'ready';
       if (shell) {
         shell.about.replaceChildren();
         delete shell.about.dataset.built;
       }
-    } catch (err) {
-      S.status = 'error';
-      S.error = err;
     }
-    renderAll();
-    if (S.status === 'ready') startQueue();
+    S.about = data.about || S.about;
+    S.range = data.range || S.range;
+    const added = [];
+    for (const raw of data.jobs || []) {
+      if (S.byId.has(raw.id)) continue;
+      const job = prepareJob(raw);
+      S.jobs.push(job);
+      S.byId.set(job.id, job);
+      added.push(job);
+    }
+    S.hasGpu = S.jobs.some((job) => (job.gpus && job.gpus.length) || job.m.gpu || job.m.gpu_mem);
+    if (first) renderAll();
+    else renderData();
+    queueJobs(added);
+  }
+
+  // Whether every job in a range (in days, 0 for the whole history) has been
+  // listed, or is still being listed.
+  function rangeListed(days) {
+    return [...S.listed].some((step) => step === 0 || (days !== 0 && step >= days));
+  }
+
+  function rangeListing(days) {
+    return !rangeListed(days) && [...S.listing].some((step) => step === 0 || (days !== 0 && step >= days));
   }
 
   function resetJobState() {
@@ -353,12 +416,15 @@
   // ---- Running seff in the background ---------------------------------------
 
   // Most recent first: by when each job finished (or started, or was
-  // submitted), then by job ID, newest first.
-  function startQueue() {
+  // submitted), then by job ID.
+  function newestFirst(a, b) {
+    return (b.lastMs - a.lastMs) || compareValues(b.sortId, a.sortId);
+  }
+
+  function queueJobs(jobs) {
     const q = S.queue;
-    q.todo = S.jobs.filter((job) => seffEligible(job) && !job.seff)
-      .sort((a, b) => (b.lastMs - a.lastMs) || compareValues(b.sortId, a.sortId));
-    q.sent = 0;
+    q.todo.push(...jobs.filter((job) => seffEligible(job) && !job.seff));
+    q.todo.sort(newestFirst);
     q.error = null;
     pump();
   }
@@ -438,6 +504,7 @@
     cpu: (job) => metricValue(job, 'cpu'),
     mem: (job) => metricValue(job, 'mem'),
     gpu: (job) => metricValue(job, 'gpu'),
+    gpu_mem: (job) => metricValue(job, 'gpu_mem'),
     profile: (job) => (isProfiled(job) ? 1 : 0)
   };
 
@@ -489,7 +556,7 @@
   function updateData() {
     const list = filteredJobs();
     const hadGpu = S.hasGpu;
-    S.hasGpu = S.hasGpu || S.jobs.some((job) => job.m.gpu);
+    S.hasGpu = S.hasGpu || S.jobs.some((job) => job.m.gpu || job.m.gpu_mem);
     renderTiles(list);
     renderProgress();
     renderCount(list);
@@ -545,6 +612,7 @@
   // A full redraw, for when the filters, the sort order or the page change.
   function renderData() {
     const list = filteredJobs();
+    renderRangeButtons();
     renderIntro();
     renderTiles(list);
     renderTable(list);
@@ -586,8 +654,10 @@
     const months = CONFIG.historyMonths || 3;
     const ranges = [[7, 'Last 7 days'], [30, 'Last 30 days'], [0, `Last ${months} months`]];
     const segmented = el('div', { class: 'segmented', role: 'group', 'aria-label': 'Time range' });
+    shell.rangeButtons = new Map();
     for (const [days, label] of ranges) {
       const button = el('button', { type: 'button', 'aria-pressed': String(S.filters.days === days) }, label);
+      shell.rangeButtons.set(days, button);
       button.addEventListener('click', () => {
         S.filters.days = days;
         for (const b of segmented.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b === button));
@@ -640,6 +710,16 @@
     );
   }
 
+  // A range whose jobs are still being listed shows a small spinner.
+  function renderRangeButtons() {
+    for (const [days, button] of shell.rangeButtons || []) {
+      const busy = rangeListing(days);
+      button.classList.toggle('is-loading', busy);
+      button.setAttribute('aria-busy', String(busy));
+      button.title = busy ? 'Still listing these jobs with sacct; the ones listed so far are shown' : '';
+    }
+  }
+
   function renderIntro() {
     const where = CONFIG.clusterName ? ` on ${CONFIG.clusterName}` : '';
     const range = S.range ? ` from ${fmtDay(S.range.start)} to ${fmtDay(S.range.end)}` : '';
@@ -659,6 +739,7 @@
       percentTile('mem', values('mem')),
       percentTile('time', values('time')),
       S.hasGpu ? percentTile('gpu', values('gpu')) : null,
+      S.hasGpu ? percentTile('gpu_mem', values('gpu_mem')) : null,
       tile('Profiled jobs', fmtInt(list.filter(isProfiled).length), 'ran with --profile task')
     ];
     shell.tiles.replaceChildren(...tiles.filter(Boolean));
@@ -678,7 +759,7 @@
     if (mid === null) {
       let why = 'seff reported this for none of these jobs';
       if (S.queue.todo.length || S.queue.inflight) why = 'waiting for seff';
-      else if (kind === 'gpu') why = 'no GPU jobs among these';
+      else if (kind === 'gpu' || kind === 'gpu_mem') why = 'no GPU jobs among these';
       return tile(kindInfo.title, '–', why);
     }
     const t = kindInfo.judged ? tone(mid) : 'neutral';
@@ -707,6 +788,33 @@
 
   function renderProgress() {
     if (!shell) return;
+    renderRangeButtons();
+    const lines = [listingLine(), seffLine()].filter(Boolean);
+    const box = shell.progress;
+    box.classList.toggle('is-error', lines.some((line) => line.classList.contains('is-error')));
+    box.hidden = !lines.length;
+    box.replaceChildren(...lines);
+  }
+
+  // How the listing of jobs with sacct is going, once the first jobs are shown.
+  function listingLine() {
+    // A failed step matters only if no other step has listed those jobs.
+    const failures = S.listErrors.filter(({ days }) => !rangeListed(days));
+    if (failures.length) {
+      const failed = failures.map(({ days }) => (days ? `the last ${days} days` : `the last ${CONFIG.historyMonths || 3} months`));
+      const err = failures[0].error;
+      return el('div', { class: 'progress-line is-error' },
+        el('span', { class: 'error-text' }, `Could not list your jobs from ${failed.join(' or ')}: ${err ? err.message : 'unknown error'}`),
+        err && err.detail ? el('span', { class: 'muted' }, err.detail) : null,
+        el('button', { class: 'btn btn-small', type: 'button', onclick: () => loadJobs() }, 'Try again'));
+    }
+    if (rangeListed(0) || !S.listing.size) return null;
+    return el('div', { class: 'progress-line' },
+      el('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      el('span', null, `Still listing your older jobs with sacct; the last ${Math.max(...S.listed)} days are shown so far…`));
+  }
+
+  function seffLine() {
     const q = S.queue;
     let eligible = 0;
     let done = 0;
@@ -715,31 +823,21 @@
       eligible += 1;
       if (job.seff) done += 1;
     }
-    const working = q.todo.length > 0 || q.inflight > 0;
-    const box = shell.progress;
-    box.classList.toggle('is-error', !!q.error);
-    if (!working && !q.error) {
-      box.hidden = true;
-      box.replaceChildren();
-      return;
+    if (q.error) {
+      return el('div', { class: 'progress-line is-error' },
+        el('span', { class: 'error-text' }, `seff could not be run: ${q.error.message}`),
+        q.error.detail ? el('span', { class: 'muted' }, q.error.detail) : null,
+        el('button', { class: 'btn btn-small', type: 'button', onclick: () => { q.error = null; pump(); } }, 'Try again'));
     }
-    box.hidden = false;
+    if (!q.todo.length && !q.inflight) return null;
     const percent = eligible ? (100 * done) / eligible : 0;
     const bar = el('div', { class: 'progress-bar', role: 'progressbar', 'aria-valuemin': '0',
       'aria-valuemax': String(eligible), 'aria-valuenow': String(done), 'aria-label': 'Jobs seff has reported on' },
     el('span', { style: `width:${percent}%` }));
-
-    if (q.error) {
-      box.replaceChildren(
-        el('span', { class: 'error-text' }, `seff could not be run: ${q.error.message}`),
-        q.error.detail ? el('span', { class: 'muted' }, q.error.detail) : null,
-        el('button', { class: 'btn btn-small', type: 'button', onclick: () => { q.error = null; pump(); } }, 'Try again'));
-      return;
-    }
     const label = q.paused
       ? `Paused: seff has reported on ${fmtInt(done)} of ${fmtInt(eligible)} finished jobs.`
       : `Running seff on your finished jobs, newest first: ${fmtInt(done)} of ${fmtInt(eligible)}…`;
-    box.replaceChildren(
+    return el('div', { class: 'progress-line' },
       q.paused ? null : el('span', { class: 'spinner', 'aria-hidden': 'true' }),
       el('span', null, label),
       bar,
@@ -762,7 +860,10 @@
       { key: 'cpu', cls: 'num', label: 'CPU', metric: 'cpu' },
       { key: 'mem', cls: 'num', label: 'Memory', metric: 'mem' }
     ];
-    if (S.hasGpu) cols.push({ key: 'gpu', cls: 'col-gpu num', label: 'GPU', metric: 'gpu' });
+    if (S.hasGpu) {
+      cols.push({ key: 'gpu', cls: 'col-gpu num', label: 'GPU', metric: 'gpu' });
+      cols.push({ key: 'gpu_mem', cls: 'col-gpu num', label: 'GPU memory', metric: 'gpu_mem' });
+    }
     cols.push({ key: 'profile', cls: 'profile', label: 'Profile' });
     return cols;
   }
@@ -773,8 +874,9 @@
 
     if (!S.jobs.length) {
       const months = CONFIG.historyMonths || 3;
-      shell.table.replaceChildren(el('div', { class: 'empty' },
-        `You have no Slurm jobs in the last ${months} months. Jobs you run will show up here.`));
+      shell.table.replaceChildren(S.listing.size
+        ? el('div', { class: 'empty' }, spinnerLine('No recent jobs; still listing your older jobs with sacct…'))
+        : el('div', { class: 'empty' }, `You have no Slurm jobs in the last ${months} months. Jobs you run will show up here.`));
       return;
     }
 
@@ -793,10 +895,10 @@
     }
     if (!shown.length) {
       body.append(el('tr', null, el('td', { colspan: String(cols.length), class: 'empty' },
-        'No jobs match these filters.')));
+        rangeListing(S.filters.days) ? 'No jobs listed here yet; still listing your jobs with sacct…' : 'No jobs match these filters.')));
     }
 
-    const table = el('table', { class: 'jobs' }, el('thead', null, headRow), body);
+    const table = el('table', { class: S.hasGpu ? 'jobs has-gpu' : 'jobs' }, el('thead', null, headRow), body);
     shell.table.replaceChildren(el('div', { class: 'table-scroll' }, table), pager(sorted.length, pages, first, shown.length));
 
     if (focusedId) {
@@ -1126,8 +1228,13 @@
     }
     if (m.gpu && m.gpu.percent < T.warning) {
       item(tone(m.gpu.percent), 'GPU', `the GPU was busy ${fmtPct(m.gpu.percent)} of the time on average. `,
-        'A GPU needs enough CPU cores to keep it fed, and a smaller GPU may do the job as well. See ',
+        'A GPU needs enough CPU cores to keep it fed: try more ', code('--cpus-per-task'), '. See ',
         link(DOCS.gpus, 'Using GPUs'), '.');
+    }
+    if (m.gpu_mem && m.gpu_mem.percent < T.warning) {
+      item(tone(m.gpu_mem.percent), 'GPU memory',
+        `its peak GPU memory use was ${m.gpu_mem.used || fmtPct(m.gpu_mem.percent)} of the ${m.gpu_mem.total || 'memory'} the GPU has. `,
+        'A GPU with less memory may do the job as well. See ', link(DOCS.gpus, 'Using GPUs'), '.');
     }
     if (m.time && job.state === 'COMPLETED' && m.time.percent < 25 && (job.elapsed_s || 0) >= 60) {
       item('neutral', 'Time', `it finished in ${m.time.used || job.elapsed} of its ${m.time.total || job.timelimit} time limit. `,
@@ -1211,14 +1318,20 @@
 
   // ---- profile_plot -------------------------------------------------------------------
 
+  // The app sends the saved plot if there is one; fresh asks it to run
+  // profile_plot again (and save the new plot).
   function loadProfile(job, fresh) {
     if (!fresh && S.profiles.has(job.raw)) return S.profiles.get(job.raw);
-    const promise = fetch(`${BASE}/api/profile?raw=${encodeURIComponent(job.raw)}`, { credentials: 'same-origin' })
+    const query = new URLSearchParams({ raw: job.raw, id: job.id, end: job.end || '' });
+    if (fresh) query.set('fresh', '1');
+    const promise = fetch(`${BASE}/api/profile?${query}`, { credentials: 'same-origin' })
       .then(async (response) => {
         const type = response.headers.get('content-type') || '';
         if (response.ok && !type.includes('application/json') && !type.includes('text/html')) {
           const blob = await response.blob();
-          return { url: URL.createObjectURL(blob), type, messages: response.headers.get('x-profile-plot-messages') || '' };
+          const saved = parseInt(response.headers.get('x-profile-plot-saved') || '', 10);
+          return { url: URL.createObjectURL(blob), type, messages: response.headers.get('x-profile-plot-messages') || '',
+            savedAt: Number.isFinite(saved) ? saved : null };
         }
         let data = null;
         try {
@@ -1253,6 +1366,12 @@
           el('div', { class: 'plot-actions' },
             el('a', { class: 'btn btn-small', href: result.url, download: `${job.id}_profile.${ext}` }, `Download ${ext.toUpperCase()}`),
             el('a', { class: 'btn btn-small', href: result.url, target: '_blank', rel: 'noopener' }, 'Open full size'),
+            el('button', { class: 'btn btn-small', type: 'button', onclick: () => startProfile(job, p, true) },
+              `Run ${CMD.profilePlot} again`),
+            result.savedAt
+              ? el('span', { class: 'muted small' },
+                `Saved plot, drawn by ${CMD.profilePlot} on ${new Date(result.savedAt * 1000).toLocaleString('en-NZ')}.`)
+              : null,
             messages.length ? el('span', { class: 'muted small' }, messages.join(' ')) : null));
         return;
       }
@@ -1314,12 +1433,12 @@
       ['SSH key', SSH_KEY[a.ssh_key] === undefined ? a.ssh_key : SSH_KEY[a.ssh_key]],
       ['sacct', a.sacct], ['seff', a.seff], ['profile_plot', a.profile_plot], ['Slurm', a.slurm],
       ['Jobs listed in', a.seconds ? `${a.seconds} s` : ''],
-      ['Saved seff reports', a.saved_reports || 'not saved (the sqlite3 gem is not installed)']
+      ['Saved reports and plots', a.saved_reports || 'not saved (the sqlite3 gem is not installed)']
     ].filter(([, value]) => value);
     const missing = ['seff', 'profile_plot'].filter((tool) => a.user && !a[tool]);
 
     const forget = el('button', { class: 'btn btn-small', type: 'button', disabled: !a.saved_reports },
-      'Forget saved seff reports');
+      'Forget saved seff reports and plots');
     forget.addEventListener('click', async () => {
       forget.disabled = true;
       try {
@@ -1336,8 +1455,9 @@
         el('p', null, 'Each job’s efficiency is exactly what ', code(CMD.seff), ' reports for it, run as you on the cluster. ',
           'Opening a job runs seff again and shows its report as printed, along with sacct’s view of the job and its steps, ',
           'its batch script and, for jobs run with ', code('--profile task'), ', the chart from ', code(CMD.profilePlot), '.'),
-        el('p', null, 'seff’s reports on finished jobs are saved, so next time seff only runs on jobs it has not ',
-          'reported on yet. They are dropped automatically whenever seff itself changes.'),
+        el('p', null, 'seff’s reports and profile_plot’s plots for finished jobs are saved, so next time seff only ',
+          'runs on jobs it has not reported on yet, and a plot opens without running profile_plot again. ',
+          'They are dropped automatically whenever seff or profile_plot itself changes.'),
         el('p', null, 'Read more: ', link(DOCS.efficiency, 'Finding Job Efficiency'), ' · ',
           link(DOCS.profiling, 'Slurm Native Profiling'), ' · ', link(DOCS.scaling, 'Job Scaling')),
         missing.length ? el('p', { class: 'error-text' }, `Not found on the cluster: ${missing.join(', ')}.`) : null,

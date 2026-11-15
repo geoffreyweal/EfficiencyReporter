@@ -4,12 +4,17 @@
 # Usage: profile_plot.sh JOBID
 #
 # Sections:
+#   about    profile_plot's checksum
 #   result   rc=<profile_plot's exit status> and file=<the file it wrote>
 #   stderr   what profile_plot printed on stderr (its messages and errors)
 #   image    the file it wrote, base64-encoded (only if it wrote one)
 
 er_main() {
   local id=$1 dir rc file="" candidate
+
+  er_begin about
+  printf 'profile_plot_fingerprint=%s\n' "$(er_fingerprint "${ER_PROFILE_PLOT[0]}")"
+  er_end about 0
 
   # Inside the script's temporary directory (see common.sh), so it is
   # removed even if profile_plot is stopped part-way.

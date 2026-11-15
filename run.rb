@@ -11,15 +11,16 @@
 # user), so the commands see exactly what the user would see in a terminal.
 #
 #   GET  /               the page (views/index.erb, public/assets/app.js)
-#   GET  /api/jobs       the user's jobs over the last history_months (sacct)
+#   GET  /api/jobs       the user's jobs over the last history_months (sacct),
+#                        or over the last ?days=N days only
 #   POST /api/seff       seff reports for a batch of finished jobs
 #   GET  /api/job        sacct, seff and the batch script for one job
 #   GET  /api/profile    profile_plot's image for one job
-#   DELETE /api/reports  forget the saved seff reports
+#   DELETE /api/reports  forget the saved seff reports and profile plots
 #
-# seff's reports on finished jobs are kept in an SQLite database in data_dir
-# (lib/seff_store.rb), as Slurm Composer keeps its job history, so opening the
-# app again only runs seff on jobs it has not reported on yet.
+# seff's reports and profile_plot's images for finished jobs are kept in an
+# SQLite database in data_dir (lib/report_store.rb), as Slurm Composer keeps
+# its job history, so opening the app again does not run them again.
 
 require "sinatra"
 require "sinatra/reloader" if ENV.fetch("RACK_ENV", "production") == "development"
@@ -34,7 +35,7 @@ require_relative "lib/ssh_key"
 require_relative "lib/profiling"
 require_relative "lib/sacct"
 require_relative "lib/seff"
-require_relative "lib/seff_store"
+require_relative "lib/report_store"
 
 set :environment, ENV.fetch("RACK_ENV", "production").to_sym
 set :host_authorization, { permitted_hosts: [] } if ENV.fetch("RACK_ENV", "production") == "development"
@@ -54,8 +55,8 @@ module EfficiencyReporter
   JOB_ID = /\A\d+(?:_\d+)?(?:\+\d+)?\z/.freeze
   RAW_ID = /\A\d+\z/.freeze
   MAX_JOBS_PER_SEFF_REQUEST = 500
-  # A seff report is saved only once the job has been over for this long, so
-  # that the last of its accounting has reached Slurm's database.
+  # A seff report or profile plot is saved only once the job has been over for
+  # this long, so that the last of its accounting has reached Slurm's database.
   SETTLE_SECONDS = 600
 end
 
@@ -100,6 +101,20 @@ helpers do
     JSON.generate(value).gsub("</", "<\\/").gsub("\u2028", "\\u2028").gsub("\u2029", "\\u2029")
   end
 
+  # Sends a profile plot. saved_at (a Unix time) says it came from the
+  # database rather than from running profile_plot just now.
+  def send_plot(bytes, type, messages, saved_at)
+    content_type type
+    headers "cache-control" => "private, max-age=600",
+            "x-content-type-options" => "nosniff",
+            "x-profile-plot-messages" => messages.to_s
+    headers "x-profile-plot-saved" => saved_at.to_s if saved_at
+    unless type.start_with?("image/png", "image/jpeg", "image/gif", "image/webp")
+      headers "content-security-policy" => "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+    end
+    bytes
+  end
+
   # A header value: printable ASCII on one line, with the lines of the
   # original joined by " | ", and not too long.
   def header_safe(text)
@@ -117,22 +132,36 @@ helpers do
     end
   end
 
-  # The saved seff reports, or nil if the sqlite3 gem is not installed.
+  # The saved seff reports and profile plots, or nil if the sqlite3 gem is
+  # not installed.
   def store
-    EfficiencyReporter::SeffStore.available? ? EfficiencyReporter::SeffStore.new(conf.data_dir) : nil
+    EfficiencyReporter::ReportStore.available? ? EfficiencyReporter::ReportStore.new(conf.data_dir) : nil
   end
 
-  # Puts the saved seff reports on the jobs they belong to, and drops the
-  # ones no longer needed.
-  def attach_saved_reports(jobs, seff_version)
+  # True once a job that ended at this time ("2026-11-14T10:23:45") has been
+  # over for long enough that what seff and profile_plot say will not change.
+  def settled?(ended)
+    finished = EfficiencyReporter::Sacct.time(ended) && Time.strptime(ended, "%Y-%m-%dT%H:%M:%S")
+    !finished.nil? && finished < Time.now - EfficiencyReporter::SETTLE_SECONDS
+  rescue ArgumentError
+    false
+  end
+
+  # Puts the saved seff reports on the jobs they belong to. Given the whole
+  # job list (complete), it also drops what is no longer needed: rows for jobs
+  # that have left the list, and rows from a different seff or profile_plot.
+  def attach_saved_reports(jobs, about, complete)
     return unless store
 
-    saved = store.load(seff_version)
+    saved = store.load_seff(about["seff_fingerprint"])
     jobs.each do |job|
       entry = saved[job["id"]]
       job["seff"] = EfficiencyReporter::Seff.present(entry) if entry && entry["raw"].to_s == job["raw"].to_s
     end
-    store.prune(jobs.map { |job| job["id"] }, seff_version) unless seff_version.to_s.empty?
+    return unless complete
+
+    store.prune(job_ids: jobs.map { |job| job["id"] }, raw_ids: jobs.map { |job| job["raw"] },
+                seff_version: about["seff_fingerprint"], plot_version: about["profile_plot_fingerprint"])
   rescue StandardError => e
     warn "[Efficiency Reporter] could not read the saved seff reports: #{e.class}: #{e.message}"
   end
@@ -143,13 +172,11 @@ helpers do
     return unless store
 
     ends = entries.to_h { |e| [e["id"], e["end"]] }
-    settled_before = Time.now - EfficiencyReporter::SETTLE_SECONDS
     keep = reports.select do |r|
-      finished = ends[r["id"]] && (Time.strptime(ends[r["id"]], "%Y-%m-%dT%H:%M:%S") rescue nil)
       r["rc"].to_i.zero? && r["error"].nil? && !r["fp"].to_s.empty? &&
-        !EfficiencyReporter::Seff.parse(r["text"])["metrics"].empty? && finished && finished < settled_before
+        !EfficiencyReporter::Seff.parse(r["text"])["metrics"].empty? && settled?(ends[r["id"]])
     end
-    store.save(keep)
+    store.save_seff(keep)
   rescue StandardError => e
     warn "[Efficiency Reporter] could not save seff reports: #{e.class}: #{e.message}"
   end
@@ -231,7 +258,12 @@ end
 
 get "/api/jobs" do
   finish = Time.now
-  start = (Date.today << conf.history_months).to_time
+  history_start = (Date.today << conf.history_months).to_time
+  # The page asks for the last 7 and 30 days as well as the whole history, at
+  # the same time, so that recent jobs show up while older ones are listed.
+  days = Integer(params["days"].to_s, exception: false)
+  start = days&.positive? ? [finish - (days * 86_400), history_start].max : history_start
+  complete = start == history_start
   result = runner.run("list_jobs", [sacct_time(start), sacct_time(finish)])
   return command_failed(result) if result.transport_error
 
@@ -242,7 +274,7 @@ get "/api/jobs" do
   end
 
   jobs = EfficiencyReporter::Sacct.parse_jobs(result.text("jobs"))
-  attach_saved_reports(jobs, about["seff_fingerprint"])
+  attach_saved_reports(jobs, about, complete)
 
   json_reply({
     "jobs" => jobs,
@@ -254,7 +286,8 @@ get "/api/jobs" do
       "saved_reports" => store ? store.path : "",
       "warnings" => Array(result.text("jobs.stderr")).reject { |w| w.strip.empty? }
     ),
-    "range" => { "start" => sacct_time(start), "end" => sacct_time(finish) }
+    "range" => { "start" => sacct_time(history_start), "end" => sacct_time(finish) },
+    "listed" => { "start" => sacct_time(start), "end" => sacct_time(finish), "complete" => complete }
   })
 end
 
@@ -310,9 +343,23 @@ get "/api/job" do
   })
 end
 
+# profile_plot's image for a job, from the database if it has been saved
+# (unless ?fresh=1), otherwise by running profile_plot, saving the image if
+# the job finished a while ago.
 get "/api/profile" do
   raw = params["raw"].to_s
   return json_reply({ "error" => "That is not a job ID." }, 400) unless raw.match?(EfficiencyReporter::RAW_ID)
+
+  job_id = params["id"].to_s.match?(EfficiencyReporter::JOB_ID) ? params["id"].to_s : raw
+  unless params["fresh"] == "1"
+    saved = begin
+      store&.load_plot(raw)
+    rescue StandardError => e
+      warn "[Efficiency Reporter] could not read a saved profile plot: #{e.class}: #{e.message}"
+      nil
+    end
+    return send_plot(saved["image"], saved["type"], saved["messages"], saved["saved_at"]) if saved
+  end
 
   result = runner.run("profile_plot", [raw], timeout: [conf.command_timeout, 180].max)
   return command_failed(result) if result.transport_error
@@ -327,14 +374,16 @@ get "/api/profile" do
 
   bytes = encoded.unpack1("m")
   type = image_type(info["file"], bytes)
-  content_type type
-  headers "cache-control" => "private, max-age=600",
-          "x-content-type-options" => "nosniff",
-          "x-profile-plot-messages" => header_safe(stderr)
-  unless type.start_with?("image/png", "image/jpeg", "image/gif", "image/webp")
-    headers "content-security-policy" => "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+  messages = header_safe(stderr)
+  version = EfficiencyReporter::Seff.key_values(result.text("about"))["profile_plot_fingerprint"].to_s
+  if store && type.start_with?("image/") && !version.empty? && settled?(params["end"].to_s)
+    begin
+      store.save_plot(raw_id: raw, job_id: job_id, image: bytes, type: type, messages: messages, version: version)
+    rescue StandardError => e
+      warn "[Efficiency Reporter] could not save a profile plot: #{e.class}: #{e.message}"
+    end
   end
-  bytes
+  send_plot(bytes, type, messages, nil)
 end
 
 delete "/api/reports" do

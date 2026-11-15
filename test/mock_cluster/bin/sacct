@@ -9,6 +9,9 @@ in ../jobs.py:
   sacct --batch-script --jobs=IDS
   sacct --json=data_parser/v0.0.43 -j IDS        (what seff runs)
   sacct -X -n -j ID --format jobidraw              (what profile_plot runs)
+
+Set ER_TEST_SACCT_SECONDS_PER_DAY to make listing a time window take that many
+seconds per day of the window, as a busy cluster's sacct can be slow.
 """
 
 import json
@@ -229,6 +232,10 @@ def main():
         print("slurm 25.05.4")
         return
     chosen = select(opts)
+    delay = float(os.environ.get("ER_TEST_SACCT_SECONDS_PER_DAY") or 0)
+    if delay and opts["starttime"] and not opts["jobs"]:
+        import time
+        time.sleep(delay * max(0, (min(to_epoch(opts["endtime"]), time.time()) - to_epoch(opts["starttime"])) / 86400))
     if opts["json"]:
         print(json.dumps({"meta": {"plugin": {"data_parser": opts["json"]}}, "jobs": [json_job(j) for j in chosen],
                           "errors": [], "warnings": []}))
