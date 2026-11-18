@@ -78,7 +78,7 @@
     about: {},
     range: null,
     hasGpu: false,
-    filters: { days: 0, state: 'all', text: '', profiled: false, attention: false },
+    filters: defaultFilters(),
     sort: { key: 'when', dir: -1 },
     page: 1,
     pageSize: 50,
@@ -89,8 +89,20 @@
     queue: { todo: [], inflight: 0, sent: 0, paused: false, error: null, mode: 'batch', batchSize: CONFIG.batchSize || 100 },
     listing: new Set(),
     listed: new Set(),
-    listErrors: []
+    listErrors: [],
+    coverage: [], // the periods sacct has listed, as [from, to] in ms
+    periodListing: null, // a picked period being listed: { key, from, to }
+    periodError: null, // or one that could not be: { key, from, to, error }
+    shownIds: new Set() // the jobs the filters show, which seff works on first
   };
+
+  // The filters: a period (days back from now, 0 for the whole history, or
+  // null for the dates in from and to), a state, text to search for, and the
+  // shortest run time (seconds) and the range of job IDs to show.
+  function defaultFilters() {
+    return { days: 0, from: '', to: '', state: 'all', text: '', profiled: false, attention: false,
+      minRun: 0, minRunValue: '', minRunUnit: 60, idFrom: null, idTo: null };
+  }
 
   let shell = null;
 
@@ -189,6 +201,47 @@
     const mm = String(d.getMinutes()).padStart(2, '0');
     const sameYear = d.getFullYear() === new Date().getFullYear();
     return `${d.getDate()} ${MONTHS[d.getMonth()]}${sameYear ? '' : ` ${d.getFullYear()}`} ${hh}:${mm}`;
+  }
+
+  const DAY = 86400000;
+  const MiB = 1024 * 1024;
+
+  // "2026-11-19" -> its local midnight in ms, or null.
+  function dateStart(text) {
+    const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(text || '');
+    return m ? new Date(+m[1], +m[2] - 1, +m[3]).getTime() : null;
+  }
+
+  // ms -> "2026-11-19", local time.
+  function dateInput(ms) {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function fmtDayMs(ms) {
+    const d = new Date(ms);
+    return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  }
+
+  function monthsAgo(n) {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth() - n, d.getDate()).getTime();
+  }
+
+  function debounce(fn, ms) {
+    let timer = null;
+    return () => {
+      clearTimeout(timer);
+      timer = setTimeout(fn, ms || 200);
+    };
+  }
+
+  const WASTE = Object.assign({ currency: '$', cpu_hour: 0.045, memory_gb_hour: 0.0065, gpu_hour: 2,
+    free_memory_mb_per_cpu: 1548 }, CONFIG.waste || {});
+
+  function fmtMoney(amount) {
+    const digits = amount < 100 ? 2 : 0;
+    return `${WASTE.currency}${amount.toLocaleString('en-NZ', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   }
 
   // "1-02:03:04", "02:03:04" or "03:04" -> seconds
@@ -317,6 +370,59 @@
     return taskProfile(job.profile_submit) || taskProfile(job.seff && job.seff.profile) || taskProfile(job.detailProfile);
   }
 
+  // What a job's unused CPUs, memory and GPUs cost, from seff's figures and
+  // what the job asked for, counted as the Grafana efficiency dashboard does:
+  // CPU time not used; memory not used, beyond the memory that comes with
+  // each CPU; and GPU time not used, each at the rates in conf.yml.erb.
+  // null until seff has reported on the job's CPU use.
+  function waste(job) {
+    if (!job.wasteOf || job.wasteOf.seff !== job.seff) job.wasteOf = { seff: job.seff, value: costJob(job) };
+    return job.wasteOf.value;
+  }
+
+  function costJob(job) {
+    const m = job.m;
+    const hours = (job.elapsed_s || 0) / 3600;
+    const cpus = job.cpus || 0;
+    if (!m.cpu || !(cpus > 0) || !(hours > 0)) return null;
+    const used = durationSeconds(m.cpu.used);
+    const reserved = durationSeconds(m.cpu.total);
+    if (used === null || !(reserved > 0)) return null;
+    const cpuCost = cpus * WASTE.cpu_hour * hours;
+    const cpuLost = cpuCost * Math.max(0, 1 - used / reserved);
+    let memCost = 0;
+    let memLost = 0;
+    const usedMB = m.mem ? sizeBytes(m.mem.used) / MiB : null;
+    const askedMB = m.mem ? sizeBytes(m.mem.total) / MiB : null;
+    if (usedMB !== null && askedMB > 0) {
+      memCost = (askedMB / 1024) * WASTE.memory_gb_hour * hours;
+      const unusedMB = Math.max(0, Math.min(askedMB - usedMB, askedMB - WASTE.free_memory_mb_per_cpu * cpus));
+      memLost = (unusedMB / 1024) * WASTE.memory_gb_hour * hours;
+    }
+    const gpus = (job.gpus || []).reduce((n, gpu) => n + (gpu.count || 0), 0);
+    const gpuCost = gpus * WASTE.gpu_hour * hours;
+    const gpuLost = gpus && m.gpu ? gpuCost * Math.max(0, 1 - m.gpu.percent / 100) : 0;
+    const cost = cpuCost + memCost + gpuCost;
+    const lost = cpuLost + memLost + gpuLost;
+    return { cost, lost, cpuLost, memLost, gpuLost, gpus, share: cost > 0 ? lost / cost : 0 };
+  }
+
+  function wasteSummary(w) {
+    const parts = [`CPU ${fmtMoney(w.cpuLost)}`, `memory ${fmtMoney(w.memLost)}`];
+    if (w.gpus) parts.push(`GPU ${fmtMoney(w.gpuLost)}`);
+    return `${fmtMoney(w.lost)} of the ${fmtMoney(w.cost)} its ${w.gpus ? 'CPUs, memory and GPUs' : 'CPUs and memory'} ` +
+      `cost (${fmtPct(100 * w.share)}): ${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}.`;
+  }
+
+  // How "Wasted" is costed, for the About section and the column's tooltip.
+  function wasteRates() {
+    const rate = (amount) => `${WASTE.currency}${Number(amount).toLocaleString('en-NZ',
+      { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
+    return `CPU time at ${rate(WASTE.cpu_hour)} per CPU hour, memory at ${rate(WASTE.memory_gb_hour)} per GB per hour ` +
+      `(not counting the first ${fmtInt(WASTE.free_memory_mb_per_cpu)} MB per CPU, which comes with the CPUs) ` +
+      `and GPU time at ${rate(WASTE.gpu_hour)} per GPU hour`;
+  }
+
   function needsAttention(job) {
     if (ATTENTION_STATES.has(job.state)) return true;
     return ['cpu', 'mem', 'gpu', 'gpu_mem'].some((kind) => job.m[kind] && job.m[kind].percent < T.warning);
@@ -336,6 +442,9 @@
     S.listing = new Set(LIST_STEPS);
     S.listed = new Set();
     S.listErrors = [];
+    S.coverage = [];
+    S.periodListing = null;
+    S.periodError = null;
     renderAll();
     for (const days of LIST_STEPS) listStep(days, token);
   }
@@ -352,7 +461,9 @@
     S.listing.delete(days);
     if (data) {
       S.listed.add(days);
+      S.coverage.push(listedInterval(data));
       mergeJobs(data);
+      if (days === 0) listPeriod(); // a period picked while the list was loading
       return;
     }
     S.listErrors.push({ days, error });
@@ -407,6 +518,75 @@
     return !rangeListed(days) && [...S.listing].some((step) => step === 0 || (days !== 0 && step >= days));
   }
 
+  // When the whole history starts (history_months ago), and the earliest a
+  // user may pick (max_history_months ago), in ms.
+  function historyStartMs() {
+    const d = S.range && parseTime(S.range.start);
+    return d ? d.getTime() : monthsAgo(CONFIG.historyMonths || 3);
+  }
+
+  function earliestMs() {
+    const d = S.range && parseTime(S.range.earliest);
+    return d ? d.getTime() : monthsAgo(CONFIG.maxHistoryMonths || 12);
+  }
+
+  // The period the list shows, as [from, to] in ms, to being Infinity for
+  // "up to now". A preset counts back from now; picked dates are whole days.
+  function period() {
+    const f = S.filters;
+    if (f.days !== null) return [f.days ? Date.now() - f.days * DAY : historyStartMs(), Infinity];
+    const from = dateStart(f.from);
+    const to = dateStart(f.to);
+    const end = to === null ? Infinity : to + DAY - 1;
+    return [Math.max(from === null ? historyStartMs() : from, earliestMs()), end >= Date.now() ? Infinity : end];
+  }
+
+  // The period a listing covered, as [from, to] in ms.
+  function listedInterval(data) {
+    const listed = data.listed || {};
+    const start = parseTime(listed.start);
+    const end = parseTime(listed.end);
+    return [start ? start.getTime() : 0, listed.to_now || !end ? Infinity : end.getTime()];
+  }
+
+  function periodListed() {
+    const [from, to] = period();
+    return S.coverage.some(([a, b]) => a <= from && b >= Math.min(to, Date.now()));
+  }
+
+  // A picked period that reaches past the jobs listed so far is listed with
+  // sacct when it is picked, and its jobs join the list.
+  function listPeriod() {
+    if (S.status !== 'ready' || S.filters.days !== null || periodListed()) return;
+    const [from, to] = period();
+    // Inside the history still being listed: that listing will cover it.
+    if (from >= historyStartMs() && S.listing.has(0)) return;
+    const key = `${dateInput(from)}..${to === Infinity ? 'now' : dateInput(to)}`;
+    if (S.periodListing && S.periodListing.key === key) return;
+    S.periodListing = { key, from, to };
+    S.periodError = null;
+    const token = S.loadToken;
+    const query = new URLSearchParams({ start: dateInput(from), end: to === Infinity ? '' : dateInput(to) });
+    api(`api/jobs?${query}`).then((data) => {
+      if (token !== S.loadToken) return;
+      S.coverage.push(listedInterval(data));
+      if (S.periodListing && S.periodListing.key === key) S.periodListing = null;
+      mergeJobs(data);
+    }).catch((error) => {
+      if (token !== S.loadToken) return;
+      if (S.periodListing && S.periodListing.key === key) S.periodListing = null;
+      S.periodError = { key, from, to, error };
+      renderData();
+    });
+    renderData();
+  }
+
+  // Whether the jobs in the period shown are still being listed.
+  function viewListing() {
+    if (S.filters.days !== null) return rangeListing(S.filters.days);
+    return !!S.periodListing || (!periodListed() && S.listing.size > 0);
+  }
+
   function resetJobState() {
     for (const promise of S.profiles.values()) {
       promise.then((p) => { if (p && p.url) URL.revokeObjectURL(p.url); });
@@ -427,10 +607,18 @@
     return (b.lastMs - a.lastMs) || compareValues(b.sortId, a.sortId);
   }
 
+  // seff works on the jobs the filters show first, newest first, then on the
+  // rest, so a period or filter picked fills in first.
+  function queueOrder(a, b) {
+    const sa = S.shownIds.has(a.id) ? 0 : 1;
+    const sb = S.shownIds.has(b.id) ? 0 : 1;
+    return (sa - sb) || newestFirst(a, b);
+  }
+
   function queueJobs(jobs) {
     const q = S.queue;
     q.todo.push(...jobs.filter((job) => seffEligible(job) && !job.seff));
-    q.todo.sort(newestFirst);
+    q.todo.sort(queueOrder);
     q.error = null;
     pump();
   }
@@ -484,10 +672,16 @@
 
   function filteredJobs() {
     const f = S.filters;
-    const since = f.days ? Date.now() - f.days * 86400000 : 0;
+    const [from, to] = period();
     const text = f.text.trim().toLowerCase();
+    let [idFrom, idTo] = [f.idFrom, f.idTo];
+    if (idFrom !== null && idTo !== null && idFrom > idTo) [idFrom, idTo] = [idTo, idFrom];
     return S.jobs.filter((job) => {
-      if (since && job.lastMs < since) return false;
+      if (job.lastMs < from || job.lastMs > to) return false;
+      if (f.minRun > 0 && (job.elapsed_s || 0) < f.minRun) return false;
+      // Job IDs: an array task (123_4) counts as its array's ID.
+      if (idFrom !== null && job.sortId[0] < idFrom) return false;
+      if (idTo !== null && job.sortId[0] > idTo) return false;
       if (f.state === 'finished') {
         if (ACTIVE.has(job.state)) return false;
       } else if (f.state !== 'all' && stateInfo(job.state).group !== f.state) {
@@ -515,6 +709,7 @@
     mem: (job) => metricValue(job, 'mem'),
     gpu: (job) => metricValue(job, 'gpu'),
     gpu_mem: (job) => metricValue(job, 'gpu_mem'),
+    waste: (job) => { const w = waste(job); return w ? w.lost : null; },
     profile: (job) => (isProfiled(job) ? 1 : 0)
   };
 
@@ -623,6 +818,8 @@
   // A full redraw, for when the filters, the sort order or the page change.
   function renderData() {
     const list = filteredJobs();
+    S.shownIds = new Set(list.map((job) => job.id));
+    if (S.queue.todo.length > 1) S.queue.todo.sort(queueOrder);
     renderRangeButtons();
     renderIntro();
     renderTiles(list);
@@ -662,27 +859,46 @@
 
   // The filters outlive a reload after an error, so the controls start from them.
   function buildToolbar() {
+    const f = S.filters;
     const months = CONFIG.historyMonths || 3;
     const ranges = [[7, 'Last 7 days'], [30, 'Last 30 days'], [0, `Last ${months} months`]];
     const segmented = el('div', { class: 'segmented', role: 'group', 'aria-label': 'Time range' });
     shell.rangeButtons = new Map();
     for (const [days, label] of ranges) {
-      const button = el('button', { type: 'button', 'aria-pressed': String(S.filters.days === days) }, label);
+      const button = el('button', { type: 'button', 'aria-pressed': String(f.days === days) }, label);
       shell.rangeButtons.set(days, button);
       button.addEventListener('click', () => {
         S.filters.days = days;
-        for (const b of segmented.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b === button));
+        S.filters.from = '';
+        S.filters.to = '';
         S.page = 1;
         renderData();
       });
       segmented.append(button);
     }
 
+    // Or any period, as two dates. The boxes show a preset's dates too.
+    shell.fromInput = el('input', { type: 'date', 'aria-label': 'Show jobs from' });
+    shell.toInput = el('input', { type: 'date', 'aria-label': 'Show jobs to' });
+    const pickPeriod = () => {
+      let from = shell.fromInput.value;
+      let to = shell.toInput.value;
+      if (from && to && from > to) [from, to] = [to, from];
+      S.filters.days = null;
+      S.filters.from = from;
+      S.filters.to = to;
+      S.page = 1;
+      renderData();
+      listPeriod();
+    };
+    shell.fromInput.addEventListener('change', pickPeriod);
+    shell.toInput.addEventListener('change', pickPeriod);
+
     const stateSelect = el('select', { 'aria-label': 'State' },
       STATE_FILTERS.map(([value, label]) => (Array.isArray(label)
         ? el('optgroup', { label: value }, label.map(([v, l]) => el('option', { value: v }, l)))
         : el('option', { value }, label))));
-    stateSelect.value = S.filters.state;
+    stateSelect.value = f.state;
     stateSelect.addEventListener('change', () => {
       S.filters.state = stateSelect.value;
       S.page = 1;
@@ -690,19 +906,46 @@
     });
 
     const search = el('input', { type: 'search', placeholder: 'Search job ID, name, project…', 'aria-label': 'Search jobs' });
-    search.value = S.filters.text;
-    let timer = null;
-    search.addEventListener('input', () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        S.filters.text = search.value;
+    search.value = f.text;
+    search.addEventListener('input', debounce(() => {
+      S.filters.text = search.value;
+      S.page = 1;
+      renderData();
+    }, 150));
+
+    // A range of job IDs; either end may be left empty.
+    const idInput = (key, placeholder, label) => {
+      const input = el('input', { type: 'text', inputmode: 'numeric', class: 'id-input', placeholder, 'aria-label': label });
+      input.value = f[key] === null ? '' : String(f[key]);
+      input.addEventListener('input', debounce(() => {
+        const m = /^\s*(\d+)/.exec(input.value);
+        S.filters[key] = m ? Number(m[1]) : null;
         S.page = 1;
         renderData();
-      }, 150);
-    });
+      }));
+      return input;
+    };
+
+    // The shortest run time to show, so short tests and failed starts can be left out.
+    const minRun = el('input', { type: 'number', min: '0', step: 'any', inputmode: 'decimal', class: 'short-input',
+      placeholder: '0', 'aria-label': 'Shortest run time to show' });
+    minRun.value = f.minRunValue;
+    const unit = el('select', { 'aria-label': 'Unit of the shortest run time' },
+      [[1, 'seconds'], [60, 'minutes'], [3600, 'hours']].map(([value, label]) =>
+        el('option', { value: String(value), selected: value === f.minRunUnit }, label)));
+    const applyMinRun = () => {
+      const value = parseFloat(minRun.value);
+      S.filters.minRunValue = minRun.value;
+      S.filters.minRunUnit = Number(unit.value);
+      S.filters.minRun = Number.isFinite(value) && value > 0 ? value * S.filters.minRunUnit : 0;
+      S.page = 1;
+      renderData();
+    };
+    minRun.addEventListener('input', debounce(applyMinRun));
+    unit.addEventListener('change', applyMinRun);
 
     const checkbox = (key, label, title) => {
-      const input = el('input', { type: 'checkbox', checked: S.filters[key] });
+      const input = el('input', { type: 'checkbox', checked: f[key] });
       input.addEventListener('change', () => {
         S.filters[key] = input.checked;
         S.page = 1;
@@ -711,31 +954,66 @@
       return el('label', { class: 'check', title }, input, label);
     };
 
+    const clear = el('button', { class: 'btn btn-small', type: 'button' }, 'Clear filters');
+    clear.addEventListener('click', () => {
+      S.filters = defaultFilters();
+      S.page = 1;
+      shell.toolbar.replaceChildren();
+      buildToolbar();
+      renderData();
+    });
+
+    const field = (label, ...controls) => el('div', { class: 'field' }, el('span', { class: 'field-label' }, label), controls);
+
     shell.toolbar.append(
-      segmented,
-      stateSelect,
-      search,
-      checkbox('profiled', 'Profiled only', 'Jobs that ran with --profile task, so profile_plot can chart them'),
-      checkbox('attention', 'Needs attention',
-        `Jobs that failed, ran out of memory or time, or used under ${T.warning}% of the CPU, memory or GPU they asked for`),
-      el('span', { class: 'spacer' }),
-      shell.count
+      el('div', { class: 'toolbar-row' },
+        segmented,
+        field('From', shell.fromInput),
+        field('to', shell.toInput),
+        el('span', { class: 'spacer' }),
+        shell.count),
+      el('div', { class: 'toolbar-row' },
+        stateSelect,
+        search,
+        field('Job IDs', idInput('idFrom', 'from', 'Lowest job ID'), el('span', { class: 'field-label' }, 'to'),
+          idInput('idTo', 'to', 'Highest job ID')),
+        field('Ran for at least', minRun, unit),
+        checkbox('profiled', 'Profiled only', 'Jobs that ran with --profile task, so profile_plot can chart them'),
+        checkbox('attention', 'Needs attention',
+          `Jobs that failed, ran out of memory or time, or used under ${T.warning}% of the CPU, memory or GPU they asked for`),
+        clear)
     );
   }
 
   // A range whose jobs are still being listed shows a small spinner.
   function renderRangeButtons() {
     for (const [days, button] of shell.rangeButtons || []) {
+      button.setAttribute('aria-pressed', String(S.filters.days === days));
       const busy = rangeListing(days);
       button.classList.toggle('is-loading', busy);
       button.setAttribute('aria-busy', String(busy));
       button.title = busy ? 'Still listing these jobs with sacct; the ones listed so far are shown' : '';
     }
+    renderPeriodInputs();
+  }
+
+  // The date boxes show the period shown, whether picked or from a preset,
+  // and allow dates back to max_history_months ago.
+  function renderPeriodInputs() {
+    if (!shell.fromInput) return;
+    const [from, to] = period();
+    for (const input of [shell.fromInput, shell.toInput]) {
+      input.min = dateInput(earliestMs());
+      input.max = dateInput(Date.now());
+    }
+    if (document.activeElement !== shell.fromInput) shell.fromInput.value = dateInput(from);
+    if (document.activeElement !== shell.toInput) shell.toInput.value = dateInput(to === Infinity ? Date.now() : to);
   }
 
   function renderIntro() {
     const where = CONFIG.clusterName ? ` on ${CONFIG.clusterName}` : '';
-    const range = S.range ? ` from ${fmtDay(S.range.start)} to ${fmtDay(S.range.end)}` : '';
+    const [from, to] = period();
+    const range = ` from ${fmtDayMs(from)} to ${fmtDayMs(to === Infinity ? Date.now() : to)}`;
     shell.intro.replaceChildren(
       `Your Slurm jobs${where}${range}, with how well each one used what it asked for, as reported by `,
       code(CMD.seff), '. Select a job to see seff’s full report, its job steps and, if it ran with ',
@@ -753,17 +1031,51 @@
       percentTile('time', values('time')),
       S.hasGpu ? percentTile('gpu', values('gpu')) : null,
       S.hasGpu ? percentTile('gpu_mem', values('gpu_mem')) : null,
+      wasteTile(list),
       tile('Profiled jobs', fmtInt(list.filter(isProfiled).length), 'ran with --profile task')
     ];
     shell.tiles.replaceChildren(...tiles.filter(Boolean));
   }
 
-  function tile(label, value, sub, extra) {
+  function tile(label, value, sub, extra, after) {
     return el('div', { class: 'tile' },
       el('p', { class: 'tile-label' }, label),
       el('p', { class: `tile-value${value === '–' ? ' is-empty' : ''}` }, value),
       extra || null,
-      sub ? el('p', { class: 'tile-sub' }, sub) : null);
+      sub ? el('p', { class: 'tile-sub' }, sub) : null,
+      after || null);
+  }
+
+  // What the unused resources of the jobs shown cost, with a way to list the
+  // most wasteful jobs first.
+  function wasteTile(list) {
+    let lost = 0;
+    let cost = 0;
+    let costed = 0;
+    for (const job of list) {
+      const w = waste(job);
+      if (!w) continue;
+      lost += w.lost;
+      cost += w.cost;
+      costed += 1;
+    }
+    if (!costed) {
+      return tile('Wasted', '–', S.queue.todo.length || S.queue.inflight ? 'waiting for seff' : 'no seff reports for these jobs');
+    }
+    const share = cost > 0 ? lost / cost : 0;
+    const t = tone(100 * (1 - share));
+    const meter = el('div', { class: 'meter-track', 'aria-hidden': 'true' },
+      el('span', { class: `meter-fill tone-${t}`, style: `width:${Math.min(100, 100 * share)}%` }));
+    const sortButton = el('button', { class: 'btn-link small', type: 'button' }, 'Most wasteful first');
+    sortButton.addEventListener('click', () => {
+      S.sort = { key: 'waste', dir: -1 };
+      S.page = 1;
+      renderData();
+      shell.table.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
+    return tile('Wasted', fmtMoney(lost),
+      `${fmtPct(100 * share)} of the ${fmtMoney(cost)} the resources of ${fmtInt(costed)} job${costed === 1 ? '' : 's'} cost`,
+      meter, el('p', { class: 'tile-sub' }, sortButton));
   }
 
   function percentTile(kind, values, note) {
@@ -802,7 +1114,7 @@
   function renderProgress() {
     if (!shell) return;
     renderRangeButtons();
-    const lines = [listingLine(), seffLine()].filter(Boolean);
+    const lines = [listingLine(), periodLine(), seffLine()].filter(Boolean);
     const box = shell.progress;
     box.classList.toggle('is-error', lines.some((line) => line.classList.contains('is-error')));
     box.hidden = !lines.length;
@@ -827,6 +1139,23 @@
       el('span', null, `Still listing your older jobs with sacct; the last ${Math.max(...S.listed)} days are shown so far…`));
   }
 
+  // How the listing of a picked period is going.
+  function periodLine() {
+    const describe = ({ from, to }) => `${fmtDayMs(from)} to ${fmtDayMs(to === Infinity ? Date.now() : to)}`;
+    if (S.periodError) {
+      const { error } = S.periodError;
+      return el('div', { class: 'progress-line is-error' },
+        el('span', { class: 'error-text' },
+          `Could not list your jobs from ${describe(S.periodError)}: ${error ? error.message : 'unknown error'}`),
+        el('button', { class: 'btn btn-small', type: 'button', onclick: () => { S.periodError = null; listPeriod(); } },
+          'Try again'));
+    }
+    if (!S.periodListing) return null;
+    return el('div', { class: 'progress-line' },
+      el('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      el('span', null, `Listing your jobs from ${describe(S.periodListing)} with sacct…`));
+  }
+
   function seffLine() {
     const q = S.queue;
     let eligible = 0;
@@ -849,7 +1178,7 @@
     el('span', { style: `width:${percent}%` }));
     const label = q.paused
       ? `Paused: seff has reported on ${fmtInt(done)} of ${fmtInt(eligible)} finished jobs.`
-      : `Running seff on your finished jobs, newest first: ${fmtInt(done)} of ${fmtInt(eligible)}…`;
+      : `Running seff on your finished jobs, the ones shown first, newest first: ${fmtInt(done)} of ${fmtInt(eligible)}…`;
     return el('div', { class: 'progress-line' },
       q.paused ? null : el('span', { class: 'spinner', 'aria-hidden': 'true' }),
       el('span', null, label),
@@ -877,6 +1206,8 @@
       cols.push({ key: 'gpu', cls: 'col-gpu num', label: 'GPU', metric: 'gpu' });
       cols.push({ key: 'gpu_mem', cls: 'col-gpu num', label: 'GPU memory', metric: 'gpu_mem' });
     }
+    cols.push({ key: 'waste', cls: 'num col-waste', label: 'Wasted',
+      title: 'What the CPU time, memory and GPU time a job reserved but did not use would cost' });
     cols.push({ key: 'profile', cls: 'profile', label: 'Profile' });
     return cols;
   }
@@ -908,7 +1239,7 @@
     }
     if (!shown.length) {
       body.append(el('tr', null, el('td', { colspan: String(cols.length), class: 'empty' },
-        rangeListing(S.filters.days) ? 'No jobs listed here yet; still listing your jobs with sacct…' : 'No jobs match these filters.')));
+        viewListing() ? 'No jobs listed here yet; still listing your jobs with sacct…' : 'No jobs match these filters.')));
     }
 
     const table = el('table', { class: S.hasGpu ? 'jobs has-gpu' : 'jobs' }, el('thead', null, headRow), body);
@@ -944,7 +1275,7 @@
   function headerCell(col) {
     if (!col.key) return el('th', { class: col.cls, scope: 'col' }, el('span', { class: 'visually-hidden' }, col.label));
     const active = S.sort.key === col.key;
-    const attrs = { class: col.cls || null, scope: 'col' };
+    const attrs = { class: col.cls || null, scope: 'col', title: col.title || null };
     if (active) attrs['aria-sort'] = S.sort.dir > 0 ? 'ascending' : 'descending';
     const button = el('button', { class: 'sort', type: 'button' },
       col.label, el('span', { class: 'sort-mark', 'aria-hidden': 'true' }, active ? (S.sort.dir > 0 ? '▲' : '▼') : ''));
@@ -1007,6 +1338,21 @@
         return el('td', { class: col.cls }, job.elapsed || '–');
       case 'asked':
         return el('td', { class: col.cls }, askedFor(job));
+      case 'waste': {
+        const td = el('td', { class: col.cls });
+        const w = waste(job);
+        if (!w) {
+          td.append(placeholder(job, 'waste'));
+          return td;
+        }
+        const t = tone(100 * (1 - w.share));
+        td.title = `Wasted ${wasteSummary(w)}`;
+        td.append(el('span', { class: 'meter' },
+          el('span', { class: 'meter-track', 'aria-hidden': 'true' },
+            el('span', { class: `meter-fill tone-${t}`, style: `width:${Math.min(100, 100 * w.share)}%` })),
+          el('span', { class: 'meter-value money' }, fmtMoney(w.lost))));
+        return td;
+      }
       case 'profile': {
         const td = el('td', { class: col.cls });
         if (isProfiled(job)) {
@@ -1235,6 +1581,9 @@
     const m = {};
     for (const metric of seff.metrics || []) if (!m[metric.kind]) m[metric.kind] = metric;
     const item = (t, title, ...text) => items.push(el('li', { class: `tone-${t}` }, el('strong', null, `${title}: `), text));
+
+    const w = waste(job);
+    if (w && w.lost >= 0.005) item(tone(100 * (1 - w.share)), 'Wasted', wasteSummary(w));
 
     if (job.state === 'OUT_OF_MEMORY') {
       item('critical', 'Memory', 'the job ran out of memory and was stopped. Ask for more next time with ',
@@ -1489,6 +1838,8 @@
         el('p', null, 'Each job’s efficiency is exactly what ', code(CMD.seff), ' reports for it, run as you on the cluster. ',
           'Opening a job runs seff again and shows its report as printed, along with sacct’s view of the job and its steps, ',
           'its batch script and, for jobs run with ', code('--profile task'), ', the chart from ', code(CMD.profilePlot), '.'),
+        el('p', null, '“Wasted” is what the resources a job reserved but did not use would cost, from seff’s figures: ',
+          `${wasteRates()}.`),
         el('p', null, 'seff’s reports and profile_plot’s plots for finished jobs are saved, so next time seff only ',
           'runs on jobs it has not reported on yet, and a plot opens without running profile_plot again. ',
           'They are dropped automatically whenever seff or profile_plot itself changes.'),

@@ -27,11 +27,17 @@ module EfficiencyReporter
       "commands" => { "sacct" => "sacct", "seff" => "seff", "profile_plot" => "profile_plot" },
       "extra_path" => "",
       "history_months" => 3,
+      # How far back a user may pick a period to look at.
+      "max_history_months" => 12,
       "seff_batch_size" => 100,
       "detect_profiling" => true,
       "command_timeout" => 120,
       "cluster_name" => "",
       "thresholds" => { "good" => 70, "warning" => 40, "serious" => 20 },
+      # What unused resources cost, to rank jobs by what they wasted (as the
+      # Grafana efficiency dashboard does).
+      "waste" => { "currency" => "$", "cpu_hour" => 0.045, "memory_gb_hour" => 0.0065, "gpu_hour" => 2.0,
+                   "free_memory_mb_per_cpu" => 1548 },
       "docs" => {
         "efficiency" => "https://docs.nesi.org.nz/Software/Profiling_and_Debugging/Finding_Job_Efficiency/",
         "profiling" => "https://docs.nesi.org.nz/Software/Profiling_and_Debugging/Slurm_Native_Profiling/",
@@ -138,6 +144,19 @@ module EfficiencyReporter
 
     def history_months
       clamp_int(@values["history_months"], 1, 24, 3)
+    end
+
+    def max_history_months
+      [clamp_int(@values["max_history_months"], 1, 120, 12), history_months].max
+    end
+
+    # Rates for costing unused resources: currency (a label) and numbers.
+    def waste
+      given = @values["waste"].is_a?(Hash) ? @values["waste"] : {}
+      DEFAULTS["waste"].to_h do |key, default|
+        value = given.fetch(key, default)
+        [key, key == "currency" ? value.to_s : (Float(value, exception: false) || default)]
+      end
     end
 
     def seff_batch_size

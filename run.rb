@@ -12,7 +12,8 @@
 #
 #   GET  /               the page (views/index.erb, public/assets/app.js)
 #   GET  /api/jobs       the user's jobs over the last history_months (sacct),
-#                        or over the last ?days=N days only
+#                        over the last ?days=N days only, or over a period the
+#                        user picked (?start=YYYY-MM-DD&end=YYYY-MM-DD)
 #   POST /api/seff       seff reports for a batch of finished jobs
 #   GET  /api/job        sacct, seff and the batch script for one job
 #   GET  /api/profile    profile_plot's image for one job
@@ -147,9 +148,10 @@ helpers do
     false
   end
 
-  # Puts the saved seff reports on the jobs they belong to. Given the whole
-  # job list (complete), it also drops what is no longer needed: rows for jobs
-  # that have left the list, and rows from a different seff or profile_plot.
+  # Puts the saved seff reports on the jobs they belong to. With the whole
+  # job list (complete), it also drops what is no longer needed: rows from a
+  # different seff or profile_plot, and rows older than any period the app
+  # lists (max_history_months).
   def attach_saved_reports(jobs, about, complete)
     return unless store
 
@@ -160,8 +162,8 @@ helpers do
     end
     return unless complete
 
-    store.prune(job_ids: jobs.map { |job| job["id"] }, raw_ids: jobs.map { |job| job["raw"] },
-                seff_version: about["seff_fingerprint"], plot_version: about["profile_plot_fingerprint"])
+    store.prune(seff_version: about["seff_fingerprint"], plot_version: about["profile_plot_fingerprint"],
+                saved_before: (Date.today << (conf.max_history_months + 1)).to_time.to_i)
   rescue StandardError => e
     warn "[Efficiency Reporter] could not read the saved seff reports: #{e.class}: #{e.message}"
   end
@@ -179,6 +181,14 @@ helpers do
     store.save_seff(keep)
   rescue StandardError => e
     warn "[Efficiency Reporter] could not save seff reports: #{e.class}: #{e.message}"
+  end
+
+  # A date the page sent ("2026-11-19"), or nil.
+  def date_param(value)
+    text = value.to_s
+    text.match?(/\A\d{4}-\d\d-\d\d\z/) ? Date.strptime(text, "%Y-%m-%d") : nil
+  rescue ArgumentError
+    nil
   end
 
   # A job as the browser sends it to /api/seff, checked.
@@ -242,6 +252,8 @@ get "/" do
   @ui_json = script_json(
     "version" => EfficiencyReporter::VERSION,
     "historyMonths" => conf.history_months,
+    "maxHistoryMonths" => conf.max_history_months,
+    "waste" => conf.waste,
     "batchSize" => conf.seff_batch_size,
     "thresholds" => conf.thresholds,
     "docs" => conf.docs,
@@ -259,12 +271,29 @@ end
 get "/api/jobs" do
   finish = Time.now
   history_start = (Date.today << conf.history_months).to_time
-  # The page asks for the last 7 and 30 days as well as the whole history, at
-  # the same time, so that recent jobs show up while older ones are listed.
-  days = Integer(params["days"].to_s, exception: false)
-  start = days&.positive? ? [finish - (days * 86_400), history_start].max : history_start
-  complete = start == history_start
-  result = runner.run("list_jobs", [sacct_time(start), sacct_time(finish)])
+  earliest = (Date.today << conf.max_history_months).to_time
+  if params.key?("start")
+    # A period the user picked: whole days, back to max_history_months ago.
+    from = date_param(params["start"])
+    to = params["end"].to_s.empty? ? Date.today : date_param(params["end"])
+    return json_reply({ "error" => "Give the period's dates as YYYY-MM-DD." }, 400) unless from && to && from <= to
+
+    start = [from.to_time, earliest].max
+    stop = [(to + 1).to_time, finish].min
+    if stop <= start
+      return json_reply({ "error" => "That period is before #{earliest.strftime('%-d %b %Y')}, the earliest the app lists." }, 400)
+    end
+
+    complete = false
+  else
+    # The page asks for the last 7 and 30 days as well as the whole history, at
+    # the same time, so that recent jobs show up while older ones are listed.
+    days = Integer(params["days"].to_s, exception: false)
+    start = days&.positive? ? [finish - (days * 86_400), history_start].max : history_start
+    stop = finish
+    complete = start == history_start
+  end
+  result = runner.run("list_jobs", [sacct_time(start), sacct_time(stop)])
   return command_failed(result) if result.transport_error
 
   about = EfficiencyReporter::Seff.key_values(result.text("about"))
@@ -286,8 +315,9 @@ get "/api/jobs" do
       "saved_reports" => store ? store.path : "",
       "warnings" => Array(result.text("jobs.stderr")).reject { |w| w.strip.empty? }
     ),
-    "range" => { "start" => sacct_time(history_start), "end" => sacct_time(finish) },
-    "listed" => { "start" => sacct_time(start), "end" => sacct_time(finish), "complete" => complete }
+    "range" => { "start" => sacct_time(history_start), "end" => sacct_time(finish), "earliest" => sacct_time(earliest) },
+    "listed" => { "start" => sacct_time(start), "end" => sacct_time(stop), "complete" => complete,
+                  "to_now" => stop == finish }
   })
 end
 

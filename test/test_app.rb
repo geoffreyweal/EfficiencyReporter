@@ -320,12 +320,12 @@ module EfficiencyReporter
 
     def test_prune_and_clear
       @store.save_seff([report("1", "v1"), report("2", "v1"), report("3", "v2")])
+      @store.save_seff([report("4", "v1").merge("fetched_at" => 1_500_000_000)])
       @store.save_plot(**plot("1", "p1"))
-      @store.save_plot(**plot("2", "p1"))
       @store.save_plot(**plot("3", "p0"))
-      @store.prune(job_ids: %w[1 3], raw_ids: %w[1 3], seff_version: "v1", plot_version: "p1")
-      assert_equal %w[1], @store.load_seff("v1").keys, "job 2 is no longer listed; job 3 is from another seff"
-      assert_equal({ "seff_reports" => 1, "profile_plots" => 1 }, @store.counts)
+      @store.prune(seff_version: "v1", plot_version: "p1", saved_before: 1_600_000_000)
+      assert_equal %w[1 2], @store.load_seff("v1").keys.sort, "job 3 is from another seff; job 4 was saved too long ago"
+      assert_equal({ "seff_reports" => 2, "profile_plots" => 1 }, @store.counts)
       refute_nil @store.load_plot("1")
       @store.clear
       assert_equal({ "seff_reports" => 0, "profile_plots" => 0 }, @store.counts)
@@ -393,6 +393,9 @@ module EfficiencyReporter
       assert_equal "#{Dir.home}/ondemand/data/sys/efficiency_reporter", conf.data_dir
       assert_equal "seff", conf.seff_command
       assert_equal 100, conf.seff_batch_size
+      assert_equal 12, conf.max_history_months
+      assert_equal({ "currency" => "$", "cpu_hour" => 0.045, "memory_gb_hour" => 0.0065, "gpu_hour" => 2.0,
+                     "free_memory_mb_per_cpu" => 1548.0 }, conf.waste)
     end
 
     def test_defaults
@@ -509,6 +512,21 @@ module EfficiencyReporter
       assert(finished.all? { |j| j["end"].to_s.match?(/\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\z/) })
     ensure
       ENV["SLURM_TIME_FORMAT"] = old
+    end
+
+    def test_a_picked_period
+      from = (Date.today << 8).strftime("%Y-%m-%d")
+      to = (Date.today << 3).strftime("%Y-%m-%d")
+      status, older = get_json("/api/jobs?start=#{from}&end=#{to}")
+      assert_equal 200, status, older.inspect
+      refute older["listed"]["complete"]
+      refute older["listed"]["to_now"]
+      recent = jobs.map { |j| j["id"] }
+      assert(older["jobs"].any? { |j| j["name"].end_with?("_old") && !recent.include?(j["id"]) },
+             "it lists jobs from before the default list")
+      # Not before max_history_months, and the dates must be dates.
+      assert_equal 400, get_json("/api/jobs?start=2001-01-01&end=2001-02-01")[0]
+      assert_equal 400, get_json("/api/jobs?start=yesterday")[0]
     end
 
     def test_recent_jobs_only

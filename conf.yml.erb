@@ -46,8 +46,12 @@ commands:
 extra_path: "/opt/nesi/bin"
 
 ## What to show
-# How many months of jobs to list.
+# How many months of jobs to list when the app opens.
 history_months: 3
+
+# How far back, in months, a user may pick a period to look at. Older jobs are
+# listed with sacct when the period is picked.
+max_history_months: 12
 
 # How many jobs to give seff in one call. seff reads them all with one sacct
 # call, which it allows 30 seconds.
@@ -68,6 +72,18 @@ thresholds:
   good:    70
   warning: 40
   serious: 20
+
+## What unused resources cost
+# Each job is costed as the Grafana efficiency dashboard does, from seff's
+# figures and what the job asked for: CPU time not used; memory not used,
+# beyond the memory that comes with each CPU; and GPU time not used. The page
+# sorts jobs by this ("Wasted") and totals it for the jobs shown.
+waste:
+  currency:               "$"
+  cpu_hour:               0.045    # per CPU (hyperthread) hour
+  memory_gb_hour:         0.0065   # per GB of memory per hour
+  gpu_hour:               2.0      # per GPU hour
+  free_memory_mb_per_cpu: 1548     # memory that comes with each CPU, never counted as wasted
 
 ## Layout
 cluster_name: "Mahuika"

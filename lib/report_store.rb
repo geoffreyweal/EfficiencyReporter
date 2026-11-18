@@ -97,18 +97,18 @@ module EfficiencyReporter
 
     # ---- Upkeep --------------------------------------------------------------
 
-    # Given the whole job list, drops what is no longer needed: rows for jobs
-    # that have left the list (older than history_months), and rows made by a
-    # different seff or profile_plot.
-    def prune(job_ids:, raw_ids:, seff_version:, plot_version:)
+    # Drops what is no longer needed: rows made by a different seff or
+    # profile_plot, and rows saved before saved_before (a Unix time), which
+    # are older than any period the app lists.
+    def prune(seff_version:, plot_version:, saved_before:)
       return unless exists?
 
       open_db do |db|
         db.transaction do
           db.execute("DELETE FROM seff_reports WHERE seff_version != ?", [seff_version.to_s]) unless seff_version.to_s.empty?
           db.execute("DELETE FROM profile_plots WHERE profile_plot_version != ?", [plot_version.to_s]) unless plot_version.to_s.empty?
-          delete_missing(db, "seff_reports", "job_id", job_ids)
-          delete_missing(db, "profile_plots", "raw_id", raw_ids)
+          db.execute("DELETE FROM seff_reports WHERE saved_at < ?", [saved_before.to_i])
+          db.execute("DELETE FROM profile_plots WHERE saved_at < ?", [saved_before.to_i])
         end
       end
     end
@@ -146,14 +146,6 @@ module EfficiencyReporter
       File.rename(old, @path) if File.exist?(old) && !File.exist?(@path)
     rescue SystemCallError
       nil
-    end
-
-    def delete_missing(db, table, column, keep)
-      keep = keep.map(&:to_s)
-      gone = db.execute("SELECT #{column} FROM #{table}").map { |row| row[column] } - keep
-      gone.each_slice(500) do |ids|
-        db.execute("DELETE FROM #{table} WHERE #{column} IN (#{(['?'] * ids.length).join(',')})", ids)
-      end
     end
 
     def open_db

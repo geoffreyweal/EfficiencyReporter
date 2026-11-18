@@ -182,6 +182,17 @@ def build():
                      profile="script"))
     jobs.append(_job(rng, nxt(30), "waiting_in_queue", None, 0, state="PENDING", cpus=0, mem_mb=8192))
 
+    # Older jobs, 4 to 8 months back, beyond the 3 months the app lists when
+    # it opens. They have lower job IDs, as older jobs do.
+    old_raw = 3_950_000
+    for i in range(30):
+        old_raw += rng.randint(50, 2000)
+        start = now - int(rng.uniform(100, 240) * day)
+        elapsed = int(rng.choice([30, 600, 3600, 14400]) * rng.uniform(0.6, 1.4))
+        jobs.append(_job(rng, old_raw, rng.choice(names) + "_old", start, elapsed, cpus=rng.choice([2, 4, 8]),
+                         mem_mb=rng.choice([2048, 8192]), cpu_eff=rng.betavariate(2, 1.6),
+                         mem_eff=rng.betavariate(1.3, 2.5)))
+
     for job in jobs:
         if job["state"] == "NEVER_STARTED":
             job["state"] = "CANCELLED"
